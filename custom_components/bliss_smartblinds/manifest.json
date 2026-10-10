@@ -1,0 +1,13 @@
+{
+  "domain": "bliss_smartblinds",
+  "name": "Bliss Smartblinds",
+  "codeowners": ["@mistermej"],
+  "config_flow": true,
+  "dependencies": ["bluetooth"],
+  "documentation": "https://github.com/mistermej/Bliss-Smartblinds",
+  "integration_type": "device",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/mistermej/Bliss-Smartblinds/issues",
+  "requirements": [],
+  "version": "1.0"
+}
