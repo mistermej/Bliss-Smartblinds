@@ -1,0 +1,42 @@
+# Internal working notes - kept on disk and in local history, but NOT part of
+# the published repository. They are reverse-engineering detail and planning,
+# not something a user of the integration needs, and the user does not want
+# them visible publicly. `git rm --cached` keeps the files on disk.
+TODO.md
+CHANGELOG.md
+AGENTS.md
+docs/
+research/
+tests/
+tools/
+.github/
+
+# Decompiled APK tree + binary - kept on disk for analysis, not in git (355 MB + 56 MB).
+# Re-create with:  apktool d "blissapp/Bliss+Smart+Blinds_3.2.0_APKPure.apk" -o blissapp/decompiled
+blissapp/decompiled/
+blissapp/*.apk
+
+# Build output
+dist/
+*.apk
+*.aab
+*.idsig
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.venv-hacheck/
+.pytest_cache/
+.mypy_cache/
+
+# Home Assistant dev
+config/
+.storage/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
