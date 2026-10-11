@@ -49,6 +49,12 @@ that physical blind. Pull requests for other motor types are welcome.
   added, and after every command.
 - **Collision guard** — clamps any move that would drive the two rails into each
   other, which could jam or damage the blind.
+- **Five diagnostic sensors per blind** — battery, health, connection, signal
+  strength and which proxy is serving it.
+- **Move verification** — every move is read back from the motor, and a move that
+  did not land is reported rather than assumed to have worked.
+- **Readable logs** — moves are logged in words at the default level; the
+  protocol detail is one level down.
 
 ---
 
@@ -97,6 +103,54 @@ You get two covers per blind, for example:
 
 Each rail is controlled independently, like the vendor app. The other rail stays
 wherever it is when you move one of them.
+
+### Sensors
+
+Each blind also gets five diagnostic sensors:
+
+| Entity | States |
+|---|---|
+| Battery | `Good`, `Low`, `Empty` |
+| Health | `OK`, or the last thing that went wrong |
+| Connection | `Connected`, `Not Connected` |
+| Signal strength | signal in dBm, as the proxy measured it |
+| Proxy | which proxy last reached the blind, by name |
+
+**Health** reads `OK` unless something has actually gone wrong. Its other states
+(`Collision`, `Move failed`, `No motor feedback`, `Cannot find blind`,
+`Position mismatch`) describe a real failure, and it returns to `OK` on the next
+clean move. Reachability is deliberately *not* a health state — that is what
+**Connection** is for.
+
+**Signal strength** is the reading from the proxy that reached the blind, which
+is the only figure that means anything: these motors are weak BLE devices, and a
+local adapter usually never hears them. It reads `unknown` until the blind has
+been connected at least once.
+
+**Proxy** resolves the proxy's address to the name you gave it in Home Assistant,
+so you see `BTP Zolder` rather than a MAC. The address stays available as the
+`address` attribute. It reads `unknown` until the blind has been reached once.
+
+**Battery** is reported by the motor itself, not measured. The mapping is
+`Good` / `Low` / `Empty` from a single status bit — so treat it as a warning
+light, not a fuel gauge. `Good` has been confirmed on real hardware; `Low` and
+`Empty` are decoded from the same bit and are **not yet verified**, because a
+flat battery is hard to come by. If you see one of them, please
+[open an issue](https://github.com/mistermej/Bliss-Smartblinds/issues) — that
+would confirm it, and an incorrect `Good` on a dying battery is worth catching.
+
+None of these poll. They update when the blind is next heard from, which is after
+every command, so a sleepy motor is never woken just to redraw a dashboard.
+
+### Diagnostics
+
+**Settings → Devices & Services → Bliss Smartblinds → ⋮ → Download diagnostics**
+gives a snapshot of each blind: cached positions, battery, health, signal
+strength and proxy. It is read-only and safe to attach to a bug report.
+
+There are deliberately no services for sending raw commands. `send_raw` can drive
+the motor with arbitrary frames, so it is not shipped — that is a decision, not
+an oversight.
 
 ### Movement safety
 
