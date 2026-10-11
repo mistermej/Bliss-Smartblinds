@@ -3,12 +3,12 @@
 Unofficial Home Assistant integration for **Hunter Douglas Bliss Smart Blinds**,
 reverse-engineered from the vendor Android app.
 
+Control your blinds **locally over Bluetooth** — no cloud account, no vendor
+server, no internet connection. Once installed, it works offline.
+
 > **Not affiliated with, endorsed by, or supported by Hunter Douglas.**
 > "Bliss" and "Hunter Douglas" are trademarks of their respective owner. This is
 > a community project.
-
-Control your blinds **locally over Bluetooth**. No cloud account, no internet
-connection, no vendor server — once installed, it works offline.
 
 > **Please note:** this is a hobby project provided as-is. I take no
 > responsibility or liability for any damage. Blinds driven by this integration
@@ -16,19 +16,25 @@ connection, no vendor server — once installed, it works offline.
 > anything that happens to your blinds or your home is entirely at your own
 > risk. Test carefully before trusting it with blinds you care about.
 
-If you appreciate my work and want to support me in continuing this project, you
-can do it through:
+If you appreciate this project and want to support its continuation:
 
-[![ko-fi](https://img.shields.io/badge/ko--fi-mistermej-FF5E5B?style=flat-square)](https://ko-fi.com/mistermej)
+<a href="https://ko-fi.com/mistermej">
+  <img src="https://storage.ko-fi.com/cdn/logomarkLogo.png" height="32" alt="Ko-fi" />
+</a>
+
+---
 
 ## Compatibility
 
-**Only tested on the `HD3800` dual-servo (TDBU) motor** — the type used in the
-Duette TDBU, which has a separately controllable top and bottom rail.
+**Tested on the `HD3800` motor.**
 
-`HD0100` and single-servo roller blinds are implemented from the same reverse
-engineering, but **no hardware testing has been done on them**. Everything in
-this README describes the TDBU only.
+That is the motor this integration was verified against on real hardware.
+
+Other motor types are implemented from the same reverse engineering, but they
+have not been tested — if you have one of those, testing it needs someone with
+that physical blind. Pull requests for other motor types are welcome.
+
+---
 
 ## Features
 
@@ -44,6 +50,8 @@ this README describes the TDBU only.
 - **Collision guard** — clamps any move that would drive the two rails into each
   other, which could jam or damage the blind.
 
+---
+
 ## Installation
 
 ### HACS (recommended)
@@ -57,6 +65,8 @@ this README describes the TDBU only.
 Copy `custom_components/bliss_smartblinds` into your Home Assistant `config`
 directory, so you end up with `config/custom_components/bliss_smartblinds`, then
 restart.
+
+---
 
 ## Configuration
 
@@ -73,6 +83,8 @@ these motors are weak BLE devices and usually need a proxy in the same room.
 The blind must already be set up and claimed in the Hunter Douglas app. It
 accepts only one Bluetooth connection at a time, so close the vendor app before
 controlling a blind from Home Assistant.
+
+---
 
 ## Usage
 
@@ -99,6 +111,8 @@ where you asked for.
 This is **stricter than the Hunter Douglas app**, whose slider clamps to exactly
 equal and applies no gap at all — so at equal positions it can even lift or push
 down a rail a bit.
+
+---
 
 ## Licence
 
