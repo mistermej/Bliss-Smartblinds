@@ -4,7 +4,7 @@
 
 - **HD3800** — tested on hardware
 
-### Implemented
+### Implementations / Bugfixes
 
 - Two independent cover entities per blind, one per rail, 0–100%
 - Both rails moving together
