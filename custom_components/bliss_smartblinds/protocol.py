@@ -108,8 +108,18 @@ def percent_to_raw(percent: float, motor_range: int = POSITION_RANGE_DEFAULT) ->
 
 
 def raw_to_percent(raw: int, motor_range: int = POSITION_RANGE_DEFAULT) -> float:
-    """Convert a raw motor value to 0-100. Raw 0 == fully open == 0%."""
-    return max(0.0, min(100.0, (float(raw) / motor_range) * 100.0))
+    """Convert a raw motor value to 0-100. Raw 0 == fully open == 0%.
+
+    Rounded to one decimal, which is the motor's own resolution at range 1000
+    (one raw unit is 0.1%). Dividing and multiplying by 100 is not exact in
+    binary floating point, so raw 280 came out as 28.000000000000004 and raw 301
+    as 30.099999999999998. Those values were then persisted and logged, and the
+    app and Home Assistant both only ever work to one decimal, so the noise is
+    pure downside: it makes stored positions ugly to read and gives the
+    verification comparison a value that looks wrong next to a clean input.
+    """
+    exact = max(0.0, min(100.0, (float(raw) / motor_range) * 100.0))
+    return round(exact, 1)
 
 
 # --- movement ---------------------------------------------------------------
