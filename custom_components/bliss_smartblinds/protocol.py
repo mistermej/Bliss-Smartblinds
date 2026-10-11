@@ -42,6 +42,10 @@ from .const import (
     OP_TOP_TO_POSITION,
     POSITION_RANGE_DEFAULT,
     POSITION_RANGE_HD0100,
+    BATTERY_BYTE_INDEX,
+    BATTERY_EMPTY,
+    BATTERY_FULL,
+    BATTERY_LOW,
     SUBCODE_MOVE,
     SUBCODE_TIME,
 )
@@ -59,6 +63,7 @@ __all__ = [
     "build_set_clock",
     "build_heartbeat",
     "encode_position",
+    "battery_from_status",
     "raw_to_percent",
     "percent_to_raw",
     "write_needs_response",
@@ -105,6 +110,44 @@ def percent_to_raw(percent: float, motor_range: int = POSITION_RANGE_DEFAULT) ->
     """Convert a 0-100 percentage to the raw motor value."""
     clamped = max(0.0, min(100.0, float(percent)))
     return int(round(clamped / 100.0 * motor_range))
+
+
+def battery_from_status(data: bytes) -> int | None:
+    """Decode the battery state from a status reply, or None if there is no room.
+
+    The vendor app maps this in ``ScanContinuousViewModelBliss$JogConnection.mapMotorRetToBattery``:
+
+        and-int/lit8 p1, p1, 0x18     ; mask bits 3 and 4
+        masked == 0x00  -> 0  BATTERY_FULL
+        masked == 0x08  -> 1  BATTERY_LOW
+        masked == 0x10  -> 2  BATTERY_EMPTY
+        anything else   -> -1 unrecognised
+
+    The byte is index 5 - the only byte of the reply the position fields do not
+    already account for:
+
+        ff 01 02 03 d2 02 46 bc 02
+                   ^^
+                   battery
+
+    Verified on an HD3800: both rails reported 0x02, which masks to 0, i.e.
+    FULL, on a healthy blind. The LOW and EMPTY branches follow the vendor's
+    own mapping but have not been seen on real hardware.
+
+    ``-1`` is returned as None rather than passed on, because it means the byte
+    held something we do not understand, and reporting a battery state we
+    guessed at would be worse than reporting none.
+    """
+    if len(data) <= BATTERY_BYTE_INDEX:
+        return None
+    masked = data[BATTERY_BYTE_INDEX] & 0x18
+    if masked == 0x00:
+        return BATTERY_FULL
+    if masked == 0x08:
+        return BATTERY_LOW
+    if masked == 0x10:
+        return BATTERY_EMPTY
+    return None
 
 
 def raw_to_percent(raw: int, motor_range: int = POSITION_RANGE_DEFAULT) -> float:
@@ -583,7 +626,7 @@ def parse_status(data: bytes, motor_range: int = POSITION_RANGE_DEFAULT) -> dict
         "percent_direct": None,
         "position_percent": None,
         "position_raw": None,
-        "battery": None,
+        "battery": battery_from_status(data),
         "notes": [],
     }
 

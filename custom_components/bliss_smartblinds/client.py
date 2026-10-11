@@ -41,6 +41,13 @@ from homeassistant.helpers.storage import Store
 from .const import (
     COMMAND_CHARACTERISTIC_UUID,
     DOMAIN,
+    HEALTH_COLLISION,
+    HEALTH_MISMATCH,
+    HEALTH_MOVE_FAILED,
+    HEALTH_NO_FEEDBACK,
+    HEALTH_NOT_FOUND,
+    HEALTH_OK,
+    HEALTH_NO_FEEDBACK,
     LOGGER_NAME,
     POSITION_RANGE_DEFAULT,
     RESPONSE_CHARACTERISTIC_UUID,
@@ -124,6 +131,11 @@ class BlissClient:
         self._save_handle: asyncio.TimerHandle | None = None
         self._idle_handle: asyncio.TimerHandle | None = None
         self._load_task: asyncio.Task | None = None
+        self.battery: int | None = None
+        # The last thing that went wrong, for the status sensor. Reset on a
+        # clean verified move, so it reflects now rather than all history.
+        self.health: str = HEALTH_OK
+        self.health_detail: str | None = None
         self._operations = 0
         # Incremented for every move. Verification that comes back for an older
         # sequence number describes a move that has since been replaced, and
@@ -193,6 +205,11 @@ class BlissClient:
     def _disconnected_callback(self, _client) -> None:
         _LOGGER.debug("%s: disconnected callback", self.address)
         self.available = False
+        # The Connection sensor reads `available`, so without this it keeps
+        # showing "Connected" after the link has gone - which is what the user
+        # saw. A dropped connection is a state change and has to be pushed, not
+        # just recorded.
+        self.notify_listeners()
 
     async def async_connect(self, timeout: float = CONNECT_TIMEOUT) -> None:
         """Establish the connection, retrying until ``timeout``.
@@ -256,6 +273,9 @@ class BlissClient:
 
                 if time.monotonic() >= deadline:
                     self.available = False
+                    self.note_health(
+                        HEALTH_NOT_FOUND, f"not reachable: {last_error}"
+                    )
                     raise ConnectionError(
                         f"Could not reach {self.address} within {timeout:.0f}s. "
                         f"Last reason: {last_error}. Things to check: (1) is the "
@@ -368,6 +388,54 @@ class BlissClient:
 
         self._save_handle = self.hass.loop.call_later(SAVE_DEBOUNCE, self.hass.async_create_task, _save())
 
+    def async_get_service_source(self) -> str | None:
+        """MAC of whichever adapter or proxy last served this blind, or None.
+
+        Worth knowing when one room works and another does not.
+
+        This is read from HA's cached service info, which exists only once
+        something has connected through it, so None simply means "not yet".
+        """
+        info = bluetooth.async_last_service_info(self.hass, self.address)
+        if info is None:
+            return None
+        source = getattr(info, "source", None)
+        return str(source) if source else None
+    def note_health(self, state: str, detail: str | None = None) -> None:
+        """Record what went wrong, so it is visible without reading the log.
+
+        Reset by a clean move, which means the sensor answers "is anything wrong
+        right now" rather than "has anything ever gone wrong".
+        """
+        if self.health == state and self.health_detail == detail:
+            return
+        # A collision is the headline for its move. The guard deliberately
+        # stopped the rails, and a later "unverified" or "mismatch" from the
+        # verification of that same move must not bury that - it would say the
+        # clamp was never reported.
+        if self.health == HEALTH_COLLISION and state in (
+            HEALTH_NO_FEEDBACK,
+            HEALTH_MISMATCH,
+        ):
+            self.health_detail = (
+                f"{self.health_detail}; also {detail}" if detail else self.health_detail
+            )
+            self.notify_listeners()
+            return
+        self.health = state
+        self.health_detail = detail
+        self.notify_listeners()
+
+    def seconds_since_seen(self) -> float | None:
+        """Seconds since the motor last answered, or None if it never has.
+
+        Rounded to one decimal for readability; anything finer is noise in a
+        diagnostic attribute.
+        """
+        if self.last_seen is None:
+            return None
+        return round(time.monotonic() - self.last_seen, 1)
+
     def is_present(self, stale_after: float = STALE_SECONDS) -> bool:
         """Whether the entity should be treated as available.
 
@@ -400,6 +468,9 @@ class BlissClient:
                     _LOGGER.debug("%s: disconnect error: %s", self.address, err)
                 self._client = None
             self.available = False
+            # Same reason as the disconnected callback: the Connection sensor
+            # would otherwise stay on "Connected" forever.
+            self.notify_listeners()
 
     
     # --- writes -------------------------------------------------------------
@@ -550,6 +621,10 @@ class BlissClient:
         # None means "could not tell" - never True. Reporting success when
         # nothing was observed is the one failure mode a guard must not have.
         if matches is None:
+            self.note_health(
+                HEALTH_NO_FEEDBACK,
+                f"motor returned no position for {result.get('adjust') or 'both'} rail",
+            )
             _LOGGER.warning(
                 "%s: move sent (%s) but the motor returned no position, so the "
                 "result is UNVERIFIED.",
@@ -559,7 +634,23 @@ class BlissClient:
                     for rail in rails
                 ),
             )
+        elif matches:
+            # The other outcomes log a warning, so without this a normal move
+            # looks identical to one that was never confirmed. The motor read
+            # back the position it was told to go to, and that is the one thing
+            # worth saying at INFO: it is evidence the command landed.
+            reached = ", ".join(
+                f"{'Top' if rail == RAIL_TOP else 'Bottom'} Rail reached target "
+                f"position ({(observed.get(rail) or {}).get('position_percent', expected[0] if rail == RAIL_TOP else expected[1]):.1f}%)"
+                for rail in rails
+            )
+            _LOGGER.info("%s: %s", self.name, reached)
         elif not matches:
+            reported = {
+                rail: (info.get("position_percent") if info else None)
+                for rail, info in observed.items()
+            }
+            self.note_health(HEALTH_MISMATCH, f"motor reported {reported}")
             _LOGGER.warning(
                 "%s: commanded %s but motor reports %s",
                 self.address,
@@ -632,19 +723,46 @@ class BlissClient:
                     bottom,
                     MIN_RAIL_GAP,
                 )
+                self.note_health(
+                    HEALTH_COLLISION,
+                    f"{moved} rail clamped to "
+                    f"{top if adjust == RAIL_TOP else bottom:.1f}%",
+                )
 
         # Clamping produces values like 30.099999999999998. Round before they
         # reach a frame, the cache or the log.
         top, bottom = round(top, 1), round(bottom, 1)
 
         frame = build_move_command(top, bottom, adjust, self.motor_range)
+
+        # Say what a person wants to read: which blind, which rail, from where
+        # to where. The MAC and the hex frame are for the debug log, where they
+        # belong - at INFO they were the only two things on the line, so every
+        # normal move looked like a protocol dump.
+        #
         # INFO, not WARNING. Moving a blind is the integration working, and a
         # warning for it made Home Assistant raise a persistent "N occurrences"
         # card in the UI every time anyone touched a slider - noise that trains
         # you to ignore the log, which is exactly where the real warnings are.
-        # INFO keeps the line in the log file for troubleshooting without
-        # claiming something went wrong.
-        _LOGGER.info(
+        rail = adjust if adjust is not None else "both"
+        was = self.position.get(rail) if rail in (RAIL_TOP, RAIL_BOTTOM) else None
+        if rail == "both":
+            _LOGGER.info(
+                "%s: Moving Top Rail to %.1f%% and Bottom Rail to %.1f%%%s",
+                self.name, top, bottom,
+                " (FORCED, rail guard skipped)" if force else "",
+            )
+        else:
+            _LOGGER.info(
+                "%s: Moving %s Rail from %s to %.1f%%%s",
+                self.name,
+                "Top" if rail == RAIL_TOP else "Bottom",
+                f"{was:.1f}%" if was is not None else "an unknown position",
+                top if rail == RAIL_TOP else bottom,
+                " (FORCED, rail guard skipped)" if force else "",
+            )
+        # Still there, just one level down where a protocol dump belongs.
+        _LOGGER.debug(
             "%s: MOVE %s%s -> %s%s",
             self.address,
             f"top={top}" if adjust == RAIL_TOP else "",
@@ -663,6 +781,7 @@ class BlissClient:
             # error - the same rule as never claiming success without evidence,
             # applied to failure.
             if not await self._async_move_landed(top, bottom, adjust):
+                self.note_health(HEALTH_MOVE_FAILED, str(err))
                 raise
             _LOGGER.warning(
                 "%s: the write reported an error (%s) but the motor is at the "
@@ -681,6 +800,11 @@ class BlissClient:
         if adjust in (None, RAIL_BOTTOM):
             self.position[RAIL_BOTTOM] = float(bottom)
         self._schedule_save()
+        # Only clear the health state if the guard did not fire. Clearing it
+        # unconditionally wiped the collision record of the very move that
+        # caused it, and the verification then replaced it with "Unverified".
+        if not clamped:
+            self.note_health(HEALTH_OK)
         self.notify_listeners()
 
         result: dict = {
@@ -797,6 +921,22 @@ class BlissClient:
             return None
         return all(verdicts)
 
+    def async_get_rssi(self) -> int | None:
+        """Signal strength in dBm, as Home Assistant last measured it.
+
+        HA caches the service info from the last connection, and that record
+        carries the RSSI the proxy that reached the blind actually measured.
+        That is the figure worth showing: the blind is normally too far from a
+        local adapter to be heard by it, so a device-level reading would sit
+        unknown forever.
+
+        None until HA has connected at least once.
+        """
+        info = bluetooth.async_last_service_info(self.hass, self.address)
+        if info is None:
+            return None
+        rssi = getattr(info, "rssi", None)
+        return rssi if isinstance(rssi, int) else None
     async def async_set_rail(self, rail: str, percent: float) -> None:
         """Move one rail, leaving the other alone.
 
@@ -863,6 +1003,11 @@ class BlissClient:
                 )
                 self.motor_range = detected
             info = parse_status(reply, self.motor_range)
+            # Battery is a motor-level attribute: it arrives on every rail's
+            # reply and both carry the same value. Take it from whichever reply
+            # decodes one, rather than per rail.
+            if info.get("battery") is not None:
+                self.battery = info["battery"]
             rail = info.get("rail")
             percent = info.get("position_percent")
             if rail is not None and percent is not None:

@@ -17,7 +17,7 @@ from .const import DOMAIN, LOGGER_NAME
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
-PLATFORMS = ["cover"]
+PLATFORMS = ["cover", "sensor"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

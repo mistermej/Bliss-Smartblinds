@@ -79,5 +79,20 @@ BATTERY_FULL = 0
 BATTERY_LOW = 1
 BATTERY_EMPTY = 2
 
+# The battery state lives in bits 3-4 of this byte of a status reply.
+# See protocol.battery_from_status for the vendor's mapping.
+BATTERY_BYTE_INDEX = 5
+
+# Health states for the status sensor. Short on purpose: this is meant to be
+# glanceable in a dashboard, not read as a log line.
+HEALTH_OK = "OK"
+HEALTH_COLLISION = "Collision"
+HEALTH_MOVE_FAILED = "Move failed"
+HEALTH_NO_FEEDBACK = "No motor feedback"
+# The blind could not be reached at all. A genuine failure - unlike simply
+# not having heard from a sleeping motor, which is the normal resting state.
+HEALTH_NOT_FOUND = "Cannot find blind"
+HEALTH_MISMATCH = "Position mismatch"
+
 # Motor type reported by TDBU (dual-servo) blinds - confirmed on hardware.
 MOTOR_TYPE_HD3800 = "HD3800"

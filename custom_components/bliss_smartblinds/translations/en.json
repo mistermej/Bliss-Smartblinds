@@ -20,8 +20,29 @@
   },
   "entity": {
     "cover": {
-      "top": { "name": "Top rail" },
-      "bottom": { "name": "Bottom rail" }
+      "top": {
+        "name": "Top rail"
+      },
+      "bottom": {
+        "name": "Bottom rail"
+      }
+    },
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      },
+      "rssi": {
+        "name": "Signal strength"
+      },
+      "proxy": {
+        "name": "Proxy"
+      },
+      "connection": {
+        "name": "Connection"
+      },
+      "health": {
+        "name": "Health"
+      }
     }
   }
 }
