@@ -653,7 +653,24 @@ class BlissClient:
             " (FORCED, rail guard skipped)" if force else "",
         )
         self._move_seq += 1
-        await self._async_write(frame)
+        try:
+            await self._async_write(frame)
+        except ConnectionError as err:
+            # With write-with-response, a lost acknowledgement is
+            # indistinguishable from a failed write as far as bleak is
+            # concerned. The user saw a blind reach 68% and be told the move had
+            # failed. Ask the motor where it actually is before believing the
+            # error - the same rule as never claiming success without evidence,
+            # applied to failure.
+            if not await self._async_move_landed(top, bottom, adjust):
+                raise
+            _LOGGER.warning(
+                "%s: the write reported an error (%s) but the motor is at the "
+                "commanded position, so the command did land and the "
+                "acknowledgement was lost. Treating the move as successful.",
+                self.address,
+                err,
+            )
 
         # Only the rail we actually commanded may be cached as "where it is
         # now". With a both-rails frame the other rail was commanded too, so it
@@ -674,6 +691,35 @@ class BlissClient:
             "seq": self._move_seq,
         }
         return result
+
+    async def _async_move_landed(
+        self, top: float, bottom: float, adjust: str | None
+    ) -> bool:
+        """Did the motor actually go where it was told, despite a write error?
+
+        Only the rail that was commanded is checked, for the same reason
+        verification is: a single-rail frame says nothing about the other rail.
+
+        Returns False when the motor cannot be reached at all. That is the
+        honest answer - no evidence either way means the move cannot be called
+        successful, so the original error stands.
+        """
+        rails: tuple[str, ...] = (adjust,) if adjust else (RAIL_TOP, RAIL_BOTTOM)
+        wanted = {RAIL_TOP: top, RAIL_BOTTOM: bottom}
+        try:
+            observed = await self._async_verify_positions(
+                expected=(top, bottom), seq=self._move_seq
+            )
+        except Exception:  # noqa: BLE001 - a failed poll answers nothing
+            _LOGGER.debug(
+                "%s: could not re-read after a write error, so the move cannot "
+                "be confirmed",
+                self.address,
+            )
+            return False
+        if not observed:
+            return False
+        return self._compare(expected=(top, bottom), observed=observed, rails=rails) is True
 
     async def _async_verify_positions(
         self,
