@@ -732,8 +732,16 @@ class BlissClient:
         the motor said nothing at all, which reported a successful, verified
         move on the strength of an empty response.
         """
+        # `expected` is a fixed (top, bottom) pair and `rails` names which of
+        # them to judge. zipping the two paired a rail name with a position by
+        # list order, so verifying the bottom rail compared it against the TOP
+        # rail's commanded position - every bottom move reported a false
+        # mismatch, and a real one would have been reported against the wrong
+        # number. Look each rail up by name instead.
+        wanted = {RAIL_TOP: expected[0], RAIL_BOTTOM: expected[1]}
         verdicts: list[bool] = []
-        for rail, want in zip(rails, expected):
+        for rail in rails:
+            want = wanted[rail]
             got = (observed.get(rail) or {}).get("position_percent")
             if got is None:
                 return None  # incomplete - never claim success
