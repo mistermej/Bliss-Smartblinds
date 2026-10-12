@@ -71,6 +71,8 @@ from .const import (
     HEALTH_OK,
     HEALTH_NO_FEEDBACK,
     HEALTH_NOT_FOUND,
+    HEALTH_SYNCED,
+    HEALTH_SYNCING,
     LOGGER_NAME,
 )
 
@@ -188,8 +190,10 @@ class BlissHealthSensor(_BlissSensorBase):
         HEALTH_COLLISION,
         HEALTH_MOVE_FAILED,
         HEALTH_NO_FEEDBACK,
-    HEALTH_NOT_FOUND,
+        HEALTH_NOT_FOUND,
         HEALTH_MISMATCH,
+        HEALTH_SYNCING,
+        HEALTH_SYNCED,
     ]
     _attr_icon = "mdi:heart-pulse"
 

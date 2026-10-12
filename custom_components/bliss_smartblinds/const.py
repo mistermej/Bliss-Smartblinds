@@ -94,5 +94,16 @@ HEALTH_NO_FEEDBACK = "No motor feedback"
 HEALTH_NOT_FOUND = "Cannot find blind"
 HEALTH_MISMATCH = "Position mismatch"
 
+# Transient, and unlike everything above these are not failures. A sync is a
+# deliberate act by the user, so showing what it is doing is more useful than a
+# blank moment followed by "OK" that could equally mean nothing happened. They
+# fall back to whatever the real health was once the blind has answered.
+HEALTH_SYNCING = "Syncing"
+HEALTH_SYNCED = "Synced"
+# How long the confirmation stays up before the sensor goes back to reporting
+# the real state. Long enough to notice on a dashboard, short enough that it
+# does not sit there looking like something is still happening.
+SYNC_CONFIRM_SECONDS = 10.0
+
 # Motor type reported by TDBU (dual-servo) blinds - confirmed on hardware.
 MOTOR_TYPE_HD3800 = "HD3800"

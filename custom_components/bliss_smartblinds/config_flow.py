@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.helpers.device_registry import format_mac
 
 from .const import CONF_ADDRESS, CONF_NAME, DOMAIN, LOGGER_NAME
 
-_LOGGER = LOGGER_NAME
+_LOGGER = logging.getLogger(LOGGER_NAME)
 
 
 def _validate_mac(value: str) -> str:
@@ -73,4 +75,21 @@ class BlissConfigFlow(ConfigFlow, domain=DOMAIN):
                 user_input.get(CONF_ADDRESS) if user_input else None
             ),
             errors=errors,
+        )
+
+    async def async_step_bluetooth(
+        self, discovery_info: BluetoothServiceInfoBleak
+    ) -> ConfigFlowResult:
+        """Handle a Bluetooth discovery flow.
+
+        HA creates this step when a BLE advertisement matches the
+        ``bluetooth`` matcher in ``manifest.json`` (local name ``HD\\d{4}``).
+        """
+        address = discovery_info.address
+        name = discovery_info.name or address
+        await self.async_set_unique_id(address.lower())
+        self._abort_if_unique_id_configured()
+        return self.async_create_entry(
+            title=name,
+            data={CONF_ADDRESS: address, CONF_NAME: name},
         )

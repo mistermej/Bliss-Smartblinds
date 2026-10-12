@@ -11,6 +11,7 @@
       }
     },
     "error": {
+      "already_configured": "This blind is already configured.",
       "invalid_mac": "That is not a valid MAC address. Use the form AA:BB:CC:DD:EE:FF."
     },
     "abort": {

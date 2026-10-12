@@ -1,0 +1,22 @@
+# Services for Bliss Smart Blinds.
+#
+# Just one. The diagnostic service set (send_raw, poll_status, move_both,
+# stop, list_services) was removed before v1.0 shipped because most of them
+# could drive a motor to anywhere; what remains is the read-only action this
+# integration has been run on since the first hardware experiments.
+
+sync:
+  name: Sync
+  description: >-
+    Read a blind's real position from the motor and update the entities.
+    Retries a few times, because these motors advertise briefly and then
+    sleep, so one poll is often answered with silence. Nothing is moved.
+    Call it with no address to sync every configured blind.
+  fields:
+    address:
+      name: MAC address
+      description: Bluetooth MAC address of the blind. Leave empty to sync every blind.
+      required: false
+      example: "FB:F0:6C:FE:F8:B2"
+      selector:
+        text:
