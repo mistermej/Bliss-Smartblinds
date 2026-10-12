@@ -48,9 +48,12 @@ from .const import (
     HEALTH_NOT_FOUND,
     HEALTH_OK,
     HEALTH_NO_FEEDBACK,
+    HEALTH_SYNCED,
+    HEALTH_SYNCING,
     LOGGER_NAME,
     POSITION_RANGE_DEFAULT,
     RESPONSE_CHARACTERISTIC_UUID,
+    SYNC_CONFIRM_SECONDS,
 )
 from .protocol import (
     RULE_TOP_ABOVE_BOTTOM,
@@ -99,6 +102,26 @@ SAVE_DEBOUNCE = 2.0
 VERIFY_RETRY_DELAY = 2.0
 VERIFY_ATTEMPTS = 3
 
+# How a synced position reads in a sentence, so the confirmation a user sees
+# says which rail is which rather than "{'top': {'position_percent': 70.1, ...}}".
+_RAIL_WORDS = {RAIL_TOP: "top rail", RAIL_BOTTOM: "bottom rail"}
+
+
+def describe_rails(parsed: dict) -> str:
+    """Render the rails a sync actually read as readable text.
+
+    Only rails the motor really reported appear. A motor that answers for one
+    rail has still given a partial answer, and padding it with the other rail's
+    last known value would claim something nobody asked it.
+    """
+    parts = []
+    for rail, info in parsed.items():
+        percent = info.get("position_percent")
+        if percent is None:
+            continue
+        parts.append(f"{_RAIL_WORDS.get(rail, rail)} {float(percent):.1f}%")
+    return ", ".join(parts)
+
 
 class BlissClient:
     """Manage the BLE connection to one Bliss blind."""
@@ -136,6 +159,10 @@ class BlissClient:
         # clean verified move, so it reflects now rather than all history.
         self.health: str = HEALTH_OK
         self.health_detail: str | None = None
+        # The health a sync interrupted, and the timer that puts it back. Kept
+        # so the transient Syncing/Synced states cannot erase a real failure.
+        self._health_before_sync: str | None = None
+        self._sync_restore: asyncio.TimerHandle | None = None
         self._operations = 0
         # Incremented for every move. Verification that comes back for an older
         # sequence number describes a move that has since been replaced, and
@@ -426,6 +453,44 @@ class BlissClient:
         self.health_detail = detail
         self.notify_listeners()
 
+    def _begin_sync(self) -> None:
+        """Show that a sync is under way, keeping the state it interrupted.
+
+        Remembering the previous health matters more than it looks. "Synced" is
+        a transient confirmation, and when it expires the sensor must go back to
+        what was actually true - a collision recorded by an earlier move is
+        still a collision, and a confirmation must not quietly erase it.
+        """
+        self._cancel_health_restore()
+        self._health_before_sync = self.health
+        self.note_health(HEALTH_SYNCING)
+
+    def _note_synced(self) -> None:
+        """Confirm a sync worked, then fall back to the real state shortly."""
+        self.note_health(HEALTH_SYNCED)
+
+        def _restore() -> None:
+            self._sync_restore = None
+            # Only step back if nothing else has spoken since. A move that
+            # failed while the confirmation was up must keep its own state.
+            if self.health == HEALTH_SYNCED:
+                self.health = (
+                    self._health_before_sync
+                    if self._health_before_sync is not None
+                    else HEALTH_OK
+                )
+                self.notify_listeners()
+
+        self._sync_restore = self.hass.loop.call_later(
+            SYNC_CONFIRM_SECONDS, _restore
+        )
+
+    def _cancel_health_restore(self) -> None:
+        """Drop a pending confirmation, so two syncs cannot race each other."""
+        if self._sync_restore is not None:
+            self._sync_restore.cancel()
+            self._sync_restore = None
+
     def seconds_since_seen(self) -> float | None:
         """Seconds since the motor last answered, or None if it never has.
 
@@ -460,6 +525,8 @@ class BlissClient:
         if self._idle_handle is not None:
             self._idle_handle.cancel()
             self._idle_handle = None
+        # A confirmation left pending would fire into a torn-down client.
+        self._cancel_health_restore()
         async with self._lock:
             if self._client is not None:
                 try:
@@ -1024,6 +1091,76 @@ class BlissClient:
             _LOGGER.debug("%s: no bottom-rail reply", self.address)
 
         return parsed
+
+    async def async_sync_positions(
+        self, attempts: int = 3, delay: float = 2.0
+    ) -> dict:
+        """Poll until the motor answers, for the sync action and button.
+
+        A single poll is not enough for these motors. They advertise for a
+        moment and then sleep, so the first poll after connecting regularly
+        comes back empty even though the connection succeeded - that is
+        exactly what the move-verification path already works around by
+        retrying (``VERIFY_ATTEMPTS``). The sync action is the one place a
+        user asks the blind where it is with nothing else keeping it awake,
+        so it needs the same patience.
+
+        Returns the parsed rails, or an empty dict when the motor stayed
+        silent through every attempt. Empty is the honest answer: the
+        cached positions are left exactly as they were.
+        """
+        self._begin_sync()
+        for attempt in range(1, attempts + 1):
+            parsed = await self.async_request_status()
+            if parsed:
+                if attempt > 1:
+                    _LOGGER.debug(
+                        "%s: sync answered on attempt %d/%d",
+                        self.address,
+                        attempt,
+                        attempts,
+                    )
+                # async_request_status already notified, but push again so a
+                # caller that replaced it still refreshes the entities.
+                self.notify_listeners()
+                # At INFO, not DEBUG: this is the answer to something the user
+                # just asked for by pressing the button, and "did it work?" has
+                # to be answerable without turning the log up. On 2026-10-12 a
+                # sync succeeded in 1.5s and the only trace was a DEBUG line, so
+                # the silence read as failure.
+                _LOGGER.info(
+                    "%s: synced - %s",
+                    self.name,
+                    describe_rails(parsed) or "the motor reported no position",
+                )
+                self._note_synced()
+                return parsed
+            if attempt < attempts:
+                _LOGGER.debug(
+                    "%s: sync attempt %d/%d got no reply, retrying in %.1fs",
+                    self.address,
+                    attempt,
+                    attempts,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        _LOGGER.warning(
+            "%s: sync got no reply after %d attempts. A blind accepts only ONE "
+            "Bluetooth connection, so the likeliest cause is something else "
+            "holding it: the Hunter Douglas app open on a phone, or this same "
+            "blind configured in another integration. Positions are unchanged. "
+            "Close the app, remove any duplicate setup, and if it really is just "
+            "asleep then a move wakes it.",
+            self.address,
+            attempts,
+        )
+        # Left in Syncing rather than forced to OK: a silent motor is not proof
+        # that nothing is wrong, and the Health sensor answering "OK" after a
+        # sync that read nothing would be a lie.
+        self.note_health(
+            HEALTH_NO_FEEDBACK, "a sync read no position from the motor"
+        )
+        return {}
 
     # --- state --------------------------------------------------------------
 

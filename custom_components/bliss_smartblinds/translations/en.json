@@ -6,12 +6,12 @@
         "description": "Enter the Bluetooth MAC address of the blind. Pair and set up the blind in the Hunter Douglas app first.",
         "data": {
           "address": "MAC address",
-          "name": "Name (optional)",
-          "motor_range": "Motor range (1000, or 100 for HD0100)"
+          "name": "Name (optional)"
         }
       }
     },
     "error": {
+      "already_configured": "This blind is already configured.",
       "invalid_mac": "That is not a valid MAC address. Use the form AA:BB:CC:DD:EE:FF."
     },
     "abort": {

@@ -44,8 +44,12 @@ that physical blind. Pull requests for other motor types are welcome.
   house.
 - **No authentication** — the vendor's account login is irrelevant to control.
 - **Works with ESPHome Bluetooth proxies** — no local Bluetooth adapter needed.
-- **Position persistence** — the last known positions survive a restart.
-- **Self-healing state** — the position is read automatically when a blind is
+- **Position persistence** - the last known positions survive a restart.
+- **Sync on demand** - a button per blind re-reads the real position from the
+  motor, or call the `bliss_smartblinds.sync` action.
+- **Auto-discovery** - a blind advertising over Bluetooth is offered for setup
+  without typing its MAC address.
+- **Self-healing state** - the position is read automatically when a blind is
   added, and after every command.
 - **Collision guard** — clamps any move that would drive the two rails into each
   other, which could jam or damage the blind.
@@ -81,6 +85,11 @@ restart.
 Enter the blind's Bluetooth MAC address, for example `AA:BB:CC:DD:EE:FF`. The
 address is on the sticker inside the blind's head rail. The name is optional.
 
+Or let Home Assistant find it: a blind that is advertising is offered for setup
+automatically, matched on the model name it broadcasts (`HD3800`). It arrives
+named `HD3800` because that is all the blind says about itself — rename it
+afterwards.
+
 You need a working Bluetooth integration, plus either a local Bluetooth adapter
 or one or more
 [ESPHome Bluetooth proxies](https://esphome.io/projects/?type=bluetooth) —
@@ -88,7 +97,8 @@ these motors are weak BLE devices and usually need a proxy in the same room.
 
 The blind must already be set up and claimed in the Hunter Douglas app. It
 accepts only one Bluetooth connection at a time, so close the vendor app before
-controlling a blind from Home Assistant.
+controlling a blind from Home Assistant — and do not set the same blind up in a
+second integration, because the two will take the link from each other.
 
 ---
 
@@ -100,9 +110,33 @@ You get two covers per blind, for example:
 |---|---|
 | `cover.living_room_top_rail` | top rail, 0–100% |
 | `cover.living_room_bottom_rail` | bottom rail, 0–100% |
+| `button.living_room_sync` | re-read both rails from the motor |
 
 Each rail is controlled independently, like the vendor app. The other rail stays
 wherever it is when you move one of them.
+
+### Syncing
+
+Press the blind's **Sync** button to ask the motor where it actually is. The
+position is cached, so a blind that has been moved by its remote — or by
+somebody else — shows the old value until you ask. Sync reads it and updates
+every entity for that blind. The **Health** sensor reads `Syncing` and then
+`Synced`, and a log line records what came back:
+
+```
+TV: synced - top rail 70.0%, bottom rail 30.1%
+```
+
+The same thing is available as an action, which returns the parsed rails so you
+can see the answer directly in **Developer Tools → Actions**:
+
+```yaml
+action: bliss_smartblinds.sync
+data:
+  address: "AA:BB:CC:DD:EE:FF"   # optional; omit to sync every blind
+```
+
+It only ever asks the motor where it is. It cannot move a blind.
 
 ### Sensors
 
@@ -120,7 +154,8 @@ Each blind also gets five diagnostic sensors:
 (`Collision`, `Move failed`, `No motor feedback`, `Cannot find blind`,
 `Position mismatch`) describe a real failure, and it returns to `OK` on the next
 clean move. Reachability is deliberately *not* a health state — that is what
-**Connection** is for.
+**Connection** is for. It also shows `Syncing` and `Synced` while you are using
+the sync button, falling back to the real state ten seconds later.
 
 **Signal strength** is the reading from the proxy that reached the blind, which
 is the only figure that means anything: these motors are weak BLE devices, and a
