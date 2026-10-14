@@ -8,6 +8,10 @@
           "address": "MAC address",
           "name": "Name (optional)"
         }
+      },
+      "bluetooth_confirm": {
+        "title": "Add Bliss blind?",
+        "description": "Found a Bliss blind advertising as {name} at {address}. Add it only once nothing else is holding the Bluetooth connection - a blind accepts ONE connection at a time, and the Hunter Douglas app or another integration will fight this one for it."
       }
     },
     "error": {
@@ -15,7 +19,8 @@
       "invalid_mac": "That is not a valid MAC address. Use the form AA:BB:CC:DD:EE:FF."
     },
     "abort": {
-      "already_configured": "This blind is already configured."
+      "already_configured": "This blind is already configured.",
+      "no_discovery_info": "The details of this blind were lost before it could be added. Wait for it to be discovered again, or add it by hand."
     }
   },
   "entity": {
@@ -42,6 +47,24 @@
       },
       "health": {
         "name": "Health"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Bliss blind settings",
+        "description": "Applies to this blind only.",
+        "data": {
+          "maintenance_mode": "Maintenance Mode",
+          "connect_timeout": "Connection timeout",
+          "speed": "Blind speed"
+        },
+        "data_description": {
+          "maintenance_mode": "ON makes this blind read-only: position, battery and health still update, but it cannot be moved. Off is normal behaviour.",
+          "connect_timeout": "How long to keep trying to reach the motor before giving up. Raise it if a blind often fails with 'Cannot find blind'; lower it to give up faster.",
+          "speed": "Speed used for every move. Slow is the slowest, Comfort the regular, and Standard the fastest of the three."
+        }
       }
     }
   }

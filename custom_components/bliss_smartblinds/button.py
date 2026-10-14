@@ -44,11 +44,12 @@ class BlissSyncButton(ButtonEntity):
     ) -> None:
         self.client = client
         self._attr_unique_id = f"{client.address}_sync"
+
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": client.name,
             "manufacturer": "Hunter Douglas",
-            "model": "Bliss Smart Blinds (TDBU)",
+            "model": client.model or "TDBU",
             "connections": {("mac", client.address)},
         }
 

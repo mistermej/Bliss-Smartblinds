@@ -273,20 +273,52 @@ def build_bottom_bar_down() -> bytes:
     return _frame(OP_BOTTOM_BAR_DOWN, SUBCODE_MOVE, b"\x01")
 
 
-def build_speed(percent: int) -> bytes:
-    """Set motor speed preset (100 / 75 / 50 / 25).
+# The three speed presets the Hunter Douglas app offers. Taken from the
+# ``BlindSpeedOptions`` enum in ``models/BlindSpeedOptions.smali``, whose
+# three members point at ``BlissCommands``:
+#
+#   SLOW    -> gen2SlowSpeedManual     ff 78 ea 41 f2 00
+#   COMFORT -> gen2ComfortSpeedManual  ff 78 ea 41 f2 01
+#   FAST    -> gen2NormalSpeedManual   ff 78 ea 41 f2 02
+#
+# One family: the same 0xF2 opcode with a trailing byte picking the speed.
+# The app's FAST is backed by a method the code happens to call
+# "gen2Normal...", which is why "Normal", "Stock" and "Fast" all mean the
+# same preset. This is a *different* command from the ``speed100`` /
+# ``speed75`` / ``speed50`` / ``speed25`` frames below, which are 0xF0-0xF3
+# with a 03 01 trailer and are not the ones the app's three named speeds
+# use. Guessing F0-F3 for Slow/Comfort/Fast would have sent frames the app
+# never sends.
+GEN2_SPEED_FRAMES = {
+    "slow": bytes.fromhex("ff78ea41f200"),
+    "comfort": bytes.fromhex("ff78ea41f201"),
+    "fast": bytes.fromhex("ff78ea41f202"),
+}
 
-    Sent as its own command, apparently before a move.
+# The matching timer-activation frames - the enum's ``timerCommand``, used
+# when a scene or timer runs the move rather than the user tapping a button.
+# Home Assistant only moves manually, so these are not sent.
+GEN2_SPEED_TIMER_FRAMES = {
+    "slow": bytes.fromhex("ff78ea41e500"),
+    "comfort": bytes.fromhex("ff78ea41e501"),
+    "fast": bytes.fromhex("ff78ea41e502"),
+}
+
+# Asks the motor which speed it is set to. Untested on hardware.
+SPEED_STATUS_FRAME = bytes.fromhex("ff78ea41da")
+
+
+def build_speed(preset: str) -> bytes:
+    """Build the speed preset frame the vendor app sends before a move.
+
+    ``preset`` is one of ``slow`` / ``comfort`` / ``fast``.
     """
-    opcodes = {
-        100: OP_SPEED_100,
-        75: OP_SPEED_75,
-        50: OP_SPEED_50,
-        25: OP_SPEED_25,
-    }
-    if percent not in opcodes:
-        raise ValueError(f"speed must be one of {sorted(opcodes)}, got {percent}")
-    return _frame(opcodes[percent], SUBCODE_MOVE, b"\x01")
+    try:
+        return GEN2_SPEED_FRAMES[preset]
+    except KeyError:
+        raise ValueError(
+            f"speed must be one of {sorted(GEN2_SPEED_FRAMES)}, got {preset!r}"
+        ) from None
 
 
 # --- status / time ----------------------------------------------------------
