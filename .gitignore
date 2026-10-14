@@ -9,10 +9,11 @@ docs/
 research/
 tests/
 tools/
-# .github/ stays local (the CI workflow), except the release template,
-# which must be committed for GitHub to offer it in the release UI.
-.github/*
-!.github/release_template.md
+# .github/ stays local, including the release template. It was committed once
+# because GitHub offers a checked-in template in the release UI; the release
+# notes are written by hand each time anyway, and the user wants nothing here
+# public. `git rm --cached` keeps it on disk.
+.github/
 
 # Decompiled APK tree + binary - kept on disk for analysis, not in git (355 MB + 56 MB).
 # Re-create with:  apktool d "blissapp/Bliss+Smart+Blinds_3.2.0_APKPure.apk" -o blissapp/decompiled
