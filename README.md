@@ -48,7 +48,9 @@ that physical blind. Pull requests for other motor types are welcome.
 - **Sync on demand** - a button per blind re-reads the real position from the
   motor, or call the `bliss_smartblinds.sync` action.
 - **Auto-discovery** - a blind advertising over Bluetooth is offered for setup
-  without typing its MAC address.
+  without typing its MAC address, and nothing is added until you confirm it.
+- **Per-blind settings** — Maintenance Mode, connection timeout and motor
+  speed, on each blind's Configure page.
 - **Self-healing state** - the position is read automatically when a blind is
   added, and after every command.
 - **Collision guard** — clamps any move that would drive the two rails into each
@@ -86,9 +88,12 @@ Enter the blind's Bluetooth MAC address, for example `AA:BB:CC:DD:EE:FF`. The
 address is on the sticker inside the blind's head rail. The name is optional.
 
 Or let Home Assistant find it: a blind that is advertising is offered for setup
-automatically, matched on the model name it broadcasts (`HD3800`). It arrives
-named `HD3800` because that is all the blind says about itself — rename it
-afterwards.
+automatically. The card shows the model and the MAC address, and nothing is
+added until you confirm. It arrives named `Blind D6C5` (from the address, since
+every blind of a given model broadcasts the same model name) — rename it in
+Home Assistant's own Name and area dialog, or afterwards on the device page.
+
+Any Hunter Douglas model is matched — the matcher is not tied to a model number.
 
 You need a working Bluetooth integration, plus either a local Bluetooth adapter
 or one or more
@@ -115,16 +120,26 @@ You get two covers per blind, for example:
 Each rail is controlled independently, like the vendor app. The other rail stays
 wherever it is when you move one of them.
 
+### Settings
+
+Each blind has three settings on its Configure page:
+
+| Setting | What it does |
+|---|---|
+| **Maintenance Mode** | Makes the blind read-only. Position, battery and health keep updating, but it cannot be moved. Intended for while a blind is being physically worked on. |
+| **Connection timeout** | How long to keep trying to reach the motor before giving up. These motors sleep between commands, so a move can take that long when a blind is asleep. |
+| **Motor speed** | `Slow`, `Comfort` or `Standard`, the three speeds the vendor app offers. Sent once, when it changes. |
+
 ### Syncing
 
 Press the blind's **Sync** button to ask the motor where it actually is. The
 position is cached, so a blind that has been moved by its remote — or by
 somebody else — shows the old value until you ask. Sync reads it and updates
 every entity for that blind. The **Health** sensor reads `Syncing` and then
-`Synced`, and a log line records what came back:
+`Synced`, and a log line records what came back, battery included:
 
 ```
-TV: synced - top rail 70.0%, bottom rail 30.1%
+TV: synced - top rail 70.0%, bottom rail 30.1% and battery Low
 ```
 
 The same thing is available as an action, which returns the parsed rails so you
@@ -155,7 +170,9 @@ Each blind also gets five diagnostic sensors:
 `Position mismatch`) describe a real failure, and it returns to `OK` on the next
 clean move. Reachability is deliberately *not* a health state — that is what
 **Connection** is for. It also shows `Syncing` and `Synced` while you are using
-the sync button, falling back to the real state ten seconds later.
+the sync button, falling back to the real state ten seconds later, and
+`Maintenance Mode` while the blind has been taken out of use on its Configure
+page.
 
 **Signal strength** is the reading from the proxy that reached the blind, which
 is the only figure that means anything: these motors are weak BLE devices, and a
@@ -168,11 +185,13 @@ so you see `BTP Zolder` rather than a MAC. The address stays available as the
 
 **Battery** is reported by the motor itself, not measured. The mapping is
 `Good` / `Low` / `Empty` from a single status bit — so treat it as a warning
-light, not a fuel gauge. `Good` has been confirmed on real hardware; `Low` and
-`Empty` are decoded from the same bit and are **not yet verified**, because a
-flat battery is hard to come by. If you see one of them, please
-[open an issue](https://github.com/mistermej/Bliss-Smartblinds/issues) — that
-would confirm it, and an incorrect `Good` on a dying battery is worth catching.
+light, not a fuel gauge. `Good` and `Low` have both been confirmed on real
+hardware; `Empty` is decoded from the same mask and has never been seen, since
+a blind that flat tends to get changed before anyone reports it.
+
+The **sync** action reports it too: its log line and its reply both include the
+battery, so a blind with a low battery does not sit there reporting perfect
+positions and looking healthy.
 
 None of these poll. They update when the blind is next heard from, which is after
 every command, so a sleepy motor is never woken just to redraw a dashboard.
