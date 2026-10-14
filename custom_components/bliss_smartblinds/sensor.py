@@ -63,9 +63,12 @@ def _device_friendly_name(device) -> str | None:
 
 from .const import (
     BATTERY_EMPTY,
+    BATTERY_LABELS,
     BATTERY_LOW,
+    CONF_MAINTENANCE_MODE,
     DOMAIN,
     HEALTH_COLLISION,
+    HEALTH_MAINTENANCE_MODE,
     HEALTH_MISMATCH,
     HEALTH_MOVE_FAILED,
     HEALTH_OK,
@@ -80,11 +83,7 @@ _LOGGER = logging.getLogger(LOGGER_NAME)
 
 # Worded as the vendor app words it, so the two can be compared directly:
 # a user looking at both should not see different words for the same state.
-BATTERY_STATES = {
-    0: "Good",
-    BATTERY_LOW: "Low",
-    BATTERY_EMPTY: "Empty",
-}
+BATTERY_STATES = BATTERY_LABELS
 
 
 async def async_setup_entry(
@@ -111,15 +110,28 @@ class _BlissSensorBase(SensorEntity):
 
     _attr_should_poll = False
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # Home Assistant composes the friendly name from the device's current
+    # name and the sensor's own, and re-derives it when the device is
+    # renamed. Without it the name was frozen on first creation, so a
+    # device renamed in Home Assistant kept sensors called "Blind F188
+    # Health".
+    _attr_has_entity_name = True
 
     def __init__(self, client: BlissClient, entry: ConfigEntry) -> None:
         self.client = client
+        # Options are read once here rather than on every property access:
+        # changing an option reloads the entry, which rebuilds every entity,
+        # so there is no way for this to go stale.
+        self._maintenance_mode = bool(
+            entry.options.get(CONF_MAINTENANCE_MODE, False)
+        )
         self._attr_unique_id = f"{entry.entry_id}_{self._key}"
+
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": client.name,
             "manufacturer": "Hunter Douglas",
-            "model": "Bliss Smart Blinds (TDBU)",
+            "model": client.model or "TDBU",
             "connections": {("mac", client.address)},
         }
 
@@ -180,6 +192,10 @@ class BlissHealthSensor(_BlissSensorBase):
     Connection sensor, so repeating it here would only invite the wrong reading.
     How long ago it was last heard is kept as an attribute rather than promoted
     to a state.
+
+    Maintenance Mode overrides all of that. A blind that is read-only cannot
+    fail a move, and one sitting on "OK" while its moves are ignored looks
+    like a fault nothing can see, so the state itself has to say why.
     """
 
     _key = "health"
@@ -194,19 +210,28 @@ class BlissHealthSensor(_BlissSensorBase):
         HEALTH_MISMATCH,
         HEALTH_SYNCING,
         HEALTH_SYNCED,
+        HEALTH_MAINTENANCE_MODE,
     ]
     _attr_icon = "mdi:heart-pulse"
 
     @property
     def native_value(self) -> str:
+        if self._maintenance_mode:
+            return HEALTH_MAINTENANCE_MODE
         return self.client.health
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {
+        attributes = {
             "detail": self.client.health_detail,
             "seconds_since_seen": self.client.seconds_since_seen(),
         }
+        if self._maintenance_mode:
+            # The real health is still being tracked underneath, and it is what
+            # the sensor will fall back to. Keep it reachable rather than
+            # destroyed by the override.
+            attributes["health_while_in_maintenance"] = self.client.health
+        return attributes
 
 
 class BlissBatterySensor(_BlissSensorBase):

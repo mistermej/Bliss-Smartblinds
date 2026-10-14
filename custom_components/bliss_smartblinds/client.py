@@ -39,6 +39,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    BATTERY_EMPTY,
+    BATTERY_LABELS,
+
     COMMAND_CHARACTERISTIC_UUID,
     DOMAIN,
     HEALTH_COLLISION,
@@ -53,6 +56,7 @@ from .const import (
     LOGGER_NAME,
     POSITION_RANGE_DEFAULT,
     RESPONSE_CHARACTERISTIC_UUID,
+    DEFAULT_SPEED,
     SYNC_CONFIRM_SECONDS,
 )
 from .protocol import (
@@ -107,6 +111,22 @@ VERIFY_ATTEMPTS = 3
 _RAIL_WORDS = {RAIL_TOP: "top rail", RAIL_BOTTOM: "bottom rail"}
 
 
+def describe_battery(battery: int | None) -> str:
+    """Render the battery state the motor reported, in the sensor's own words.
+
+    The battery lives on the client rather than in the rails, because it is a
+    motor-level attribute that arrives on every rail's reply. A sync has it in
+    hand and simply never said so, which is how a blind with a low battery
+    reported perfect positions and looked perfectly healthy.
+
+    Returns the word "unknown" for None, and the caller decides whether that
+    means "not reported" - it is not a state the motor ever sends.
+    """
+    if battery is None:
+        return "unknown"
+    return BATTERY_LABELS.get(battery, "unknown")
+
+
 def describe_rails(parsed: dict) -> str:
     """Render the rails a sync actually read as readable text.
 
@@ -115,7 +135,14 @@ def describe_rails(parsed: dict) -> str:
     last known value would claim something nobody asked it.
     """
     parts = []
-    for rail, info in parsed.items():
+    # Walked the known rails rather than the dict's keys, because the sync reply
+    # also carries the battery alongside them - a motor-level attribute that is
+    # not a rail. Iterating blindly broke on it with
+    # "'str' object has no attribute 'get'".
+    for rail in (RAIL_TOP, RAIL_BOTTOM):
+        info = parsed.get(rail)
+        if not isinstance(info, dict):
+            continue
         percent = info.get("position_percent")
         if percent is None:
             continue
@@ -143,7 +170,27 @@ class BlissClient:
         # temporary clients kept the address exactly as the user typed it.
         self.address = str(address).upper()
         self.name = name or self.address
+        # The motor's model number, resolved from its advertisement on
+        # first read. None until something has been heard from it.
+        self._model: str | None = None
         self.motor_range = motor_range
+        # From the options flow. ``connect_timeout`` is how long we keep trying
+        # to hear the motor; ``speed`` is the preset written before every move,
+        # one of slow/comfort/standard, and is always set.
+        self.connect_timeout: float = CONNECT_TIMEOUT
+        # One of the three presets. There is deliberately no "leave the motor
+        # alone" value: the app offers no such choice either.
+        self.speed: str = DEFAULT_SPEED
+        # The last preset actually written to the motor, and therefore the one
+        # the motor is running at. The vendor app writes the speed once, when
+        # the user changes it on the speed screen, and never as part of a move:
+        # ``BlindSpeedOptions.getManualCommand()`` is invoked only from
+        # ``SettingsBlindSpeedScreenKt`` and ``BlindSpeedScreenKt``, both of
+        # which are the speed screens. The motor remembers the setting, so
+        # repeating the frame on every move would be a command the app never
+        # sends - and, on a write-with-response, a round trip added to every
+        # command for no effect.
+        self._speed_written: str | None = None
 
         # Safety switches. Movement is OFF until explicitly enabled.
         self.movement_enabled = False
@@ -238,8 +285,12 @@ class BlissClient:
         # just recorded.
         self.notify_listeners()
 
-    async def async_connect(self, timeout: float = CONNECT_TIMEOUT) -> None:
+    async def async_connect(self, timeout: float | None = None) -> None:
         """Establish the connection, retrying until ``timeout``.
+
+        ``timeout`` defaults to the user's configured connect timeout rather
+        than the module constant, so the options flow actually reaches the one
+        place that waits.
 
         Two things make a single attempt unreliable for these blinds:
 
@@ -252,6 +303,7 @@ class BlissClient:
         So instead of failing on the first miss, poll for the device to appear
         and connect as soon as it does.
         """
+        timeout = self.connect_timeout if timeout is None else timeout
         async with self._lock:
             if self._client is not None and self._client.is_connected:
                 self.available = True
@@ -428,6 +480,31 @@ class BlissClient:
             return None
         source = getattr(info, "source", None)
         return str(source) if source else None
+    @property
+    def model(self) -> str:
+        """The motor's model number, from its own advertisement.
+
+        A Bliss motor broadcasts it as its local name - "HD3800" - and Home
+        Assistant keeps the last advertisement it heard. Reading it here covers
+        a blind that was typed in by hand as well as one discovered over the
+        air, so the device page shows the model either way.
+
+        Deliberately not written back to the config entry: doing that cost a
+        reload of the whole entry for a value that only fills one device
+        attribute, and the write itself had to not be awaited, which is a trap
+        with no upside. A cache miss falls back to the product family, and is
+        tried again next time because a failed read is not remembered.
+        """
+        if self._model is None:
+            try:
+                info = bluetooth.async_last_service_info(self.hass, self.address)
+            except Exception:  # noqa: BLE001 - a cache miss must never break
+                return ""
+            name = getattr(info, "name", None) if info is not None else None
+            if name:
+                self._model = str(name)
+        return self._model or ""
+
     def note_health(self, state: str, detail: str | None = None) -> None:
         """Record what went wrong, so it is visible without reading the log.
 
@@ -460,9 +537,16 @@ class BlissClient:
         a transient confirmation, and when it expires the sensor must go back to
         what was actually true - a collision recorded by an earlier move is
         still a collision, and a confirmation must not quietly erase it.
+
+        Only a real state may be remembered. Pressing sync again while a
+        previous confirmation is still showing would capture that transient
+        state, and the confirmation would then restore the sensor to "Synced",
+        where it would stay forever - a second race in the same ten seconds
+        permanently spoofs a successful sync.
         """
         self._cancel_health_restore()
-        self._health_before_sync = self.health
+        if self.health not in (HEALTH_SYNCING, HEALTH_SYNCED):
+            self._health_before_sync = self.health
         self.note_health(HEALTH_SYNCING)
 
     def _note_synced(self) -> None:
@@ -474,11 +558,14 @@ class BlissClient:
             # Only step back if nothing else has spoken since. A move that
             # failed while the confirmation was up must keep its own state.
             if self.health == HEALTH_SYNCED:
-                self.health = (
-                    self._health_before_sync
-                    if self._health_before_sync is not None
-                    else HEALTH_OK
-                )
+                # Belt and braces: never hand back a transient state even if an
+                # older build recorded one, and clear the memory so it cannot be
+                # reused by a later confirmation.
+                previous = self._health_before_sync
+                if not previous or previous in (HEALTH_SYNCING, HEALTH_SYNCED):
+                    previous = HEALTH_OK
+                self._health_before_sync = None
+                self.health = previous
                 self.notify_listeners()
 
         self._sync_restore = self.hass.loop.call_later(
@@ -758,8 +845,9 @@ class BlissClient:
         """
         if not self.movement_enabled:
             raise ConnectionError(
-                f"{self.address}: movement is disabled. Enable it explicitly "
-                "with the set_movement_enabled service first."
+                f"{self.address}: this blind is in Maintenance Mode, so it will "
+                "not be driven. Turn Maintenance Mode off in the integration's "
+                "Configure settings to move it again."
             )
 
         # Clamp rather than refuse, which is what the vendor app does with its
@@ -839,6 +927,18 @@ class BlissClient:
         )
         self._move_seq += 1
         try:
+            # The vendor app sends the preset as its own command before a move
+            # - but only when it has changed. The app's getManualCommand() is
+            # invoked from its speed screens and never from a move path, so it
+            # sets the speed once and lets the motor remember it. Mirroring
+            # that means a user who picks Comfort gets one frame, not one per
+            # move, and a user who never changes anything gets none at all
+            # after the first.
+            if self.speed != self._speed_written:
+                await self._async_write(build_speed(self.speed), wait=0.0)
+                # Only recorded on success: a failed write must retry on the
+                # next move rather than being silently remembered as sent.
+                self._speed_written = self.speed
             await self._async_write(frame)
         except ConnectionError as err:
             # With write-with-response, a lost acknowledgement is
@@ -1131,9 +1231,27 @@ class BlissClient:
                 _LOGGER.info(
                     "%s: synced - %s",
                     self.name,
-                    describe_rails(parsed) or "the motor reported no position",
+                    " and ".join(
+                        part
+                        for part in (
+                            describe_rails(parsed)
+                            or "the motor reported no position",
+                            f"battery {describe_battery(self.battery)}",
+                        )
+                        # A motor that did not report a battery says nothing
+                        # about it, and inventing one would be worse than
+                        # staying quiet.
+                        if "battery unknown" not in part
+                    ),
                 )
                 self._note_synced()
+                # The battery is on the client, not in the rails, so it has to
+                # be folded in by hand or the action's reply never shows it.
+                if self.battery is not None:
+                    return {
+                        **parsed,
+                        "battery": describe_battery(self.battery),
+                    }
                 return parsed
             if attempt < attempts:
                 _LOGGER.debug(

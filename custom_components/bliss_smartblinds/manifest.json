@@ -1,18 +1,49 @@
 {
   "domain": "bliss_smartblinds",
   "name": "Bliss Smartblinds",
-  "codeowners": ["@mistermej"],
+  "codeowners": [
+    "@mistermej"
+  ],
   "config_flow": true,
-  "dependencies": ["bluetooth"],
+  "dependencies": [
+    "bluetooth"
+  ],
   "documentation": "https://github.com/mistermej/Bliss-Smartblinds",
   "integration_type": "device",
   "iot_class": "local_push",
   "bluetooth": [
     {
-      "local_name": "HD\\d{4}"
+      "local_name": "HD0*"
+    },
+    {
+      "local_name": "HD1*"
+    },
+    {
+      "local_name": "HD2*"
+    },
+    {
+      "local_name": "HD3*"
+    },
+    {
+      "local_name": "HD4*"
+    },
+    {
+      "local_name": "HD5*"
+    },
+    {
+      "local_name": "HD6*"
+    },
+    {
+      "local_name": "HD7*"
+    },
+    {
+      "local_name": "HD8*"
+    },
+    {
+      "local_name": "HD9*"
     }
   ],
   "issue_tracker": "https://github.com/mistermej/Bliss-Smartblinds/issues",
   "requirements": [],
-  "version": "1.3"
+  "version": "1.4"
 }

@@ -11,6 +11,52 @@ CONF_ADDRESS = "address"
 CONF_NAME = "name"
 CONF_MOTOR_RANGE = "motor_range"
 
+# --- Options (options.py) ---------------------------------------------------
+# Stored inverted from the old ``allow_movement``: the switch in the UI is
+# labelled "Maintenance Mode", so ON must mean the blind will not move. Keeping
+# the old name would have meant a toggle labelled "Maintenance Mode" that turned
+# movement *on*.
+CONF_MAINTENANCE_MODE = "maintenance_mode"
+# Seconds to keep trying to reach the motor before giving up. Deliberately a
+# duration and not a retry count: these motors advertise periodically, so how
+# long we have been waiting is what decides whether one was heard, and "3 tries"
+# means anything from four seconds to a minute depending on the proxy.
+CONF_CONNECT_TIMEOUT = "connect_timeout"
+# Motor speed preset, sent as its own frame before a move. "default"
+# means "leave the motor's own setting alone", which is the default -
+# movement works without it, and a user who has not asked for a preset
+# should not have frames written that they did not request.
+#
+# The three presets are the app's own, from the ``BlindSpeedOptions``
+# enum in ``models/BlindSpeedOptions.smali``, which has exactly three
+# members - SLOW, COMFORT and FAST - each wired to its gen2 frame.
+# All three share opcode 0xF2 and differ only in a trailing byte, so
+# they are one family, not four independent speed opcodes. The app's
+# FAST is backed by the method the code happens to name
+# ``gen2NormalSpeedManual``; on some app builds that same preset is
+# the one labelled "Stock"/"Standard".
+CONF_SPEED = "speed"
+# Exactly the three presets the app offers. There is deliberately no "leave it
+# alone" choice: the app has none either, and a fourth option that sends
+# nothing reads on a dashboard as though the setting were ignored.
+SPEED_CHOICES = ("slow", "comfort", "fast")
+# "Standard" - the app's name for this preset - is the default, because it is
+# the one a blind arrives from the factory running at.
+DEFAULT_SPEED = "fast"
+SPEED_LABELS = {
+    "slow": "Slow",
+    "comfort": "Comfort",
+    # The app displays this preset as "Standard" even though the enum member
+    # and the resource key are both called *fast* (``setSpeed.fast`` ->
+    # "Standard" in res/values/strings.xml). The stored value stays "fast"
+    # because that is the traceable identifier in the app's code; only the
+    # label is the user-facing word. Do not "correct" one to match the other.
+    "fast": "Standard",
+}
+DEFAULT_CONNECT_TIMEOUT = 45
+CONNECT_TIMEOUT_MIN = 5
+CONNECT_TIMEOUT_MAX = 300
+
 # --- GATT (presentation/util/BleCharacteristics.kt) --------------------------
 SERVICE_UUID = "00010203-0405-0607-0809-0a0b0c0d1910"
 COMMAND_CHARACTERISTIC_UUID = "00010405-0405-0607-0809-0a0b0c0d1910"
@@ -83,6 +129,15 @@ BATTERY_EMPTY = 2
 # See protocol.battery_from_status for the vendor's mapping.
 BATTERY_BYTE_INDEX = 5
 
+# The words the motor's battery states are shown as. In const rather than
+# sensor.py because the sync action and its log line need them too, and a
+# second copy would be a second thing to keep in step.
+BATTERY_LABELS = {
+    BATTERY_FULL: "Good",
+    BATTERY_LOW: "Low",
+    BATTERY_EMPTY: "Empty",
+}
+
 # Health states for the status sensor. Short on purpose: this is meant to be
 # glanceable in a dashboard, not read as a log line.
 HEALTH_OK = "OK"
@@ -100,6 +155,12 @@ HEALTH_MISMATCH = "Position mismatch"
 # fall back to whatever the real health was once the blind has answered.
 HEALTH_SYNCING = "Syncing"
 HEALTH_SYNCED = "Synced"
+
+# Not a fault. It says the blind has been deliberately taken out of use, which
+# is worth showing in the same place as the failures, because a blind sitting
+# on "OK" whose moves are being ignored looks exactly like a blind that is
+# broken in a way nothing can see.
+HEALTH_MAINTENANCE_MODE = "Maintenance Mode"
 # How long the confirmation stays up before the sensor goes back to reporting
 # the real state. Long enough to notice on a dashboard, short enough that it
 # does not sit there looking like something is still happening.

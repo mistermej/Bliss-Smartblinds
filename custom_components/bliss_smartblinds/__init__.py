@@ -8,15 +8,38 @@ vendor Android app.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import (
+    Event,
+    HomeAssistant,
+    ServiceCall,
+    SupportsResponse,
+    callback,
+)
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import (
+    EVENT_DEVICE_REGISTRY_UPDATED,
+    EventDeviceRegistryUpdatedData,
+)
 
 from .client import BlissClient
-from .const import CONF_ADDRESS, DOMAIN, LOGGER_NAME
+from .const import (
+    CONF_ADDRESS,
+    CONF_CONNECT_TIMEOUT,
+    CONF_MAINTENANCE_MODE,
+    CONF_SPEED,
+    DEFAULT_CONNECT_TIMEOUT,
+    DOMAIN,
+    LOGGER_NAME,
+    DEFAULT_SPEED,
+    SPEED_CHOICES,
+SPEED_LABELS,
+)
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
@@ -128,7 +151,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # `set_movement_enabled` gate was a testing scaffold: it defaulted to off,
     # lived in memory only, and left configured entities unable to do anything.
     # It is still available as a service to stop movement without editing config.
-    client.movement_enabled = entry.options.get("allow_movement", True)
+    _apply_options(client, dict(entry.options))
+
+    # Worth having at DEBUG: a user reporting "my setting does nothing" cannot
+    # be answered without knowing what the client was actually given, and this
+    # line also proves the integration loaded the version being tested.
+    _LOGGER.debug(
+        "%s: settings applied - movement %s, connect timeout %.0fs, speed %s",
+        name,
+        "allowed" if client.movement_enabled else "BLOCKED",
+        client.connect_timeout,
+        SPEED_LABELS.get(client.speed, client.speed),
+    )
     # Restore persisted positions before the first operation, so a save can
     # never be skipped and the entities have their state from the start.
     client.async_setup_storage(entry.entry_id)
@@ -166,12 +200,141 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_update_options))
     _register_sync_service(hass)
+
+    # The device does not exist until a platform has set up its first entity,
+    # so this can only run once the forwards are done.
+    _remember_options(hass, entry)
+    _sync_device_name(hass, entry)
+    entry.async_on_unload(
+        _async_watch_device_renames(hass, entry)
+    )
     return True
 
 
+def _identifiers(entry: ConfigEntry) -> set[tuple[str, str]]:
+    """The device-registry identifiers this integration owns for one blind."""
+    return {(DOMAIN, entry.entry_id)}
+
+
+@callback
+def _sync_device_name(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Make the device's own name match the config entry's title.
+
+    Only ever sets the name the *integration* provides. A user who has renamed
+    the device has set ``name_by_user``, which Home Assistant prefers over
+    anything an integration writes, so their choice wins and this does nothing.
+    """
+    dev_reg = dr.async_get(hass)
+    device = dev_reg.async_get_device(identifiers=_identifiers(entry))
+    if device is None:
+        # The device only exists once a platform has set up its first entity,
+        # so a blind with no entities yet has nothing to sync into.
+        return
+    if device.name_by_user:
+        return
+    if device.name == entry.title:
+        return
+    dev_reg.async_update_device(device.id, name=entry.title)
+
+
+@callback
+def _async_watch_device_renames(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> Callable[[], None]:
+    """Follow a device rename back onto the config entry.
+
+    Home Assistant's rename dialog for a config entry says the name "should be
+    equal to the device name", and the two drift apart the moment either is
+    renamed on its own. This closes that from the other side: renaming the
+    device renames the entry, and moves the client's name with it so the log
+    lines change in the same gesture.
+
+    Returns an unsubscribe callback, for ``entry.async_on_unload``.
+    """
+    dev_reg = dr.async_get(hass)
+
+    @callback
+    def _device_updated(event: Event[EventDeviceRegistryUpdatedData]) -> None:
+        if event.data.get("action") != "update":
+            return
+        device_id = event.data.get("device_id")
+        if not device_id:
+            return
+        device = dev_reg.async_get(device_id)
+        # Subset, not membership: a device can carry identifiers from more than
+        # one integration if another one set it up, and ours is a tuple inside
+        # the set, not a set inside it. ``our_ids not in device.identifiers``
+        # compares a set against its elements and is always True for a
+        # non-empty set of ours, which silently disabled this whole listener.
+        if device is None or not _identifiers(entry).issubset(device.identifiers):
+            return
+        user_name = device.name_by_user
+        # Only a rename the *user* made. An integration-side name write - from
+        # _sync_device_name above, or a platform rebuilding its entities - is
+        # not a decision to copy, and copying it would undo the user's title.
+        if not user_name or user_name == entry.title:
+            return
+        client = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+        if client is not None:
+            client.name = user_name
+        hass.config_entries.async_update_entry(entry, title=user_name)
+
+    return hass.bus.async_listen(EVENT_DEVICE_REGISTRY_UPDATED, _device_updated)
+
+
+
+def _options_changed(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Whether the options actually differ from the ones last applied.
+
+    Home Assistant fires the update listeners for *any* change to an entry -
+    a rename, a version bump - not only for options. Reloading on all of them
+    meant the cosmetic title write the device-rename listener makes tore the
+    BLE connection down and reconnected for nothing: a rename is not a reason
+    to drop the link to the motor.
+    """
+    last = hass.data.get(DOMAIN, {}).get(f"__options__{entry.entry_id}")
+    return last != dict(entry.options)
+
+
+def _remember_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Record the options currently applied, for _options_changed above."""
+    hass.data.setdefault(DOMAIN, {})[f"__options__{entry.entry_id}"] = dict(
+        entry.options
+    )
+
+
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload the entry when options change."""
+    """Reload the entry when options change, and keep the device name in step."""
+    # A renamed config entry lands here too, and the device should follow it
+    # straight away rather than waiting for a reload that may not happen.
+    _sync_device_name(hass, entry)
+
+    if not _options_changed(hass, entry):
+        return
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+
+
+def _apply_options(client: BlissClient, options: dict) -> None:
+    """Push stored options onto the client.
+
+    Read on setup as well as after a reload, so a value stored by an earlier
+    version - or edited by hand - takes effect rather than being ignored.
+    """
+    # Inverted: the switch is labelled "Maintenance Mode", so ON must mean the
+    # blind will not move. Default off, because a configured blind that cannot
+    # move is a broken blind and nobody switched it on.
+    client.movement_enabled = not options.get(CONF_MAINTENANCE_MODE, False)
+    client.connect_timeout = float(
+        options.get(CONF_CONNECT_TIMEOUT, DEFAULT_CONNECT_TIMEOUT)
+    )
+    # Always one of the three presets. A value stored by an earlier version
+    # (when "motor default" existed) is not a preset and would make
+    # build_speed() raise mid-move, so it is folded onto the default
+    # rather than trusted.
+    speed = str(options.get(CONF_SPEED, DEFAULT_SPEED))
+    client.speed = speed if speed in SPEED_CHOICES else DEFAULT_SPEED
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

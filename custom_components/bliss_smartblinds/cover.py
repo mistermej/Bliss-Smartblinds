@@ -64,6 +64,10 @@ class BlissCover(CoordinatorEntity, CoverEntity):
     """One rail of a TDBU blind."""
 
     _attr_device_class = CoverDeviceClass.BLIND
+    # Home Assistant composes the friendly name from the device's current
+    # name plus this entity's own, and re-derives it when the device is
+    # renamed. Without it the name was frozen on first creation.
+    _attr_has_entity_name = True
     _attr_should_poll = False  # the coordinator handles polling
     _attr_supported_features = (
         CoverEntityFeature.OPEN
@@ -83,17 +87,22 @@ class BlissCover(CoordinatorEntity, CoverEntity):
         self.client = client
         self.rail = rail
 
-        rail_label = "Top rail" if rail == RAIL_TOP else "Bottom rail"
-        # Set the name explicitly. Relying on translation_key alone leaves both
-        # entities showing the device name, so there is no way to tell which
-        # rail is which in the UI.
-        self._attr_name = f"{client.name} {rail_label}"
+        # Just the rail. Home Assistant prepends the device's name because
+        # _attr_has_entity_name is set below, and it does that from the
+        # device's *current* name - so a device renamed to "Geen idee" yields
+        # "Geen idee Top".
+        #
+        # The device name used to be baked in here, which froze every entity on
+        # the name the integration first saw: a later rename in Home Assistant
+        # reached the device and nothing underneath it.
+        self._attr_name = "Top rail" if rail == RAIL_TOP else "Bottom rail"
         self._attr_unique_id = f"{entry.entry_id}_{rail}"
+
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
             "name": client.name,
             "manufacturer": "Hunter Douglas",
-            "model": "Bliss Smart Blinds (TDBU)",
+            "model": client.model or "TDBU",
             "connections": {("mac", client.address)},
         }
 
