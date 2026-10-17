@@ -127,8 +127,45 @@ Each blind has three settings on its Configure page:
 | Setting | What it does |
 |---|---|
 | **Maintenance Mode** | Makes the blind read-only. Position, battery and health keep updating, but it cannot be moved. Intended for while a blind is being physically worked on. |
-| **Connection timeout** | How long to keep trying to reach the motor before giving up. These motors sleep between commands, so a move can take that long when a blind is asleep. |
-| **Motor speed** | `Slow`, `Comfort` or `Standard`, the three speeds the vendor app offers. Sent once, when it changes. |
+| **Timeout** | How long to keep trying to reach the motor before giving up. These motors sleep between commands, so a move can take that long when a blind is asleep. |
+| **Speed** | `Slow`, `Comfort` or `Standard`, the three speeds the vendor app offers. Sent once, when it changes. |
+
+### Presets
+
+Also under Configure: **position presets** — a saved top rail and bottom rail,
+named after what they are for. The first screen is a menu, so choosing
+what to do costs one tap rather than an **Action** dropdown plus a submit.
+
+- **Add a preset** takes a name and both rail positions — one screen,
+  one submit, with no preset dropdown anywhere on it.
+- **Change or delete a preset** is one screen holding both jobs: the preset to
+  act on, the fields, and a box to tick to remove that preset instead of
+  saving. One submit either way, and anything left blank keeps its saved value,
+  so changing only a position does not mean retyping the other one.
+
+Every saved preset, with its positions, is listed at the top of that
+screen before anything is chosen. A form cannot show a dropdown's choice in its
+own boxes — it is drawn before the choice exists — so the values live in the
+form's description instead of costing a submit to load them, and all of them
+are readable at once rather than one at a time. Changing the dropdown after a
+mistake brings up that preset's blanks rather than writing the previous one's
+numbers over it.
+
+Removing needs two deliberate actions: the box ticked, then submitted, with the
+preset's name in the dropdown above it.
+
+Top has to stay at least 1% above bottom — the same rail guard a manual move
+gets, because it is a physical limit of the motor rather than a preference. It
+is refused, never silently adjusted.
+
+Deleting the last preset removes the two preset entities with it.
+
+Each blind with presets also gets:
+
+| Entity | What it does |
+|---|---|
+| **Preset** (select) | Pick a preset to send the blind to its positions. Usable from a dashboard or an automation. |
+| **Position** (sensor) | Which preset the blind is at, or `Custom` if it has been moved off one. Derived from the live position, so it follows a move made with the blind's own remote. |
 
 ### Syncing
 

@@ -295,6 +295,11 @@ GEN2_SPEED_FRAMES = {
     "fast": bytes.fromhex("ff78ea41f202"),
 }
 
+# The motor answers a speed frame. Measured on hardware at 64 ms after the
+# write, for Comfort: ``ff 01 02 03 de f2 01 00 00`` - the opcode and the
+# preset byte echoed back. Nothing reads it yet, so it is recorded here rather
+# than kept as a constant nothing would use.
+
 # The matching timer-activation frames - the enum's ``timerCommand``, used
 # when a scene or timer runs the move rather than the user tapping a button.
 # Home Assistant only moves manually, so these are not sent.
@@ -309,9 +314,16 @@ SPEED_STATUS_FRAME = bytes.fromhex("ff78ea41da")
 
 
 def build_speed(preset: str) -> bytes:
-    """Build the speed preset frame the vendor app sends before a move.
+    """Build the speed preset frame the vendor app sends for a named speed.
 
     ``preset`` is one of ``slow`` / ``comfort`` / ``fast``.
+
+    The app writes this frame when the user changes the speed on a speed
+    screen, and never as part of a move: ``BlindSpeedOptions.getManualCommand()``
+    is reached only from ``SettingsBlindSpeedScreenKt`` and
+    ``BlindSpeedScreenKt``. This integration does the same, from the options
+    flow. It has to: on real hardware the frame alone beeps the blind, with or
+    without a move behind it.
     """
     try:
         return GEN2_SPEED_FRAMES[preset]

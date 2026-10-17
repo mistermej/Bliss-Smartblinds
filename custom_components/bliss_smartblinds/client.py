@@ -90,7 +90,18 @@ REPLY_GAP = 1.0
 # After a move, wait for the motor to reach the target before reading back.
 VERIFY_DELAY = 1.5
 # How far the reported position may differ from the commanded one.
-VERIFY_TOLERANCE = 5.0
+#
+# 1.0%, which is what the user accepted as a reached position; anything past
+# that is a rail that did not get where it was told to go. It was 5.0, which
+# called a rail five percent off target "reached" - the width of the rail stack
+# itself on a short blind. Readback does not quantise, so a value this small is
+# a genuine measurement rather than an artefact of the reporting: measured
+# readbacks come back as 85.1, 81.4, 30.3, not as whole numbers.
+#
+# A move that lands out is retried VERIFY_ATTEMPTS times before it is called a
+# failure, so a tight tolerance costs a little time rather than reporting a
+# healthy motor as broken.
+VERIFY_TOLERANCE = 1.0
 # How long the motor may stay silent before the entity is called unavailable.
 # These motors are sleepy and the link can be weak, so allow a generous window.
 CONNECT_TIMEOUT = 45.0
@@ -105,6 +116,22 @@ SAVE_DEBOUNCE = 2.0
 # Extra delay before a verification retry; a travelling motor may not answer.
 VERIFY_RETRY_DELAY = 2.0
 VERIFY_ATTEMPTS = 3
+# How many further reads to take while a rail is provably still on its way.
+#
+# The first read happens 1.5s after the command, which for a long move is
+# mid-flight. A preset commanded to 70/30 read back top=72.4, bottom=24.8 at
+# that moment - both between where they started and where they were going - and
+# was reported as the motor going to a wrong position when the blind had simply
+# not finished. Waiting is the whole fix: a position that has not arrived
+# cannot be compared with the target, because it is not the final answer.
+#
+# This is a safety valve, not a wait time. It is only reached while a rail is
+# demonstrably between its starting point and its target, and running out of it
+# reports the move as UNVERIFIED rather than as a wrong position - the one
+# outcome that is true either way.
+VERIFY_SETTLE_ATTEMPTS = 6
+# Two reads this close together count as the rail having stopped.
+VERIFY_STABLE_EPSILON = 1.0
 
 # How a synced position reads in a sentence, so the confirmation a user sees
 # says which rail is which rather than "{'top': {'position_percent': 70.1, ...}}".
@@ -150,6 +177,26 @@ def describe_rails(parsed: dict) -> str:
     return ", ".join(parts)
 
 
+def describe_reach(rail: str, target: float, motor: float) -> str:
+    """Render one rail's success line: the target, and what the motor reports.
+
+    Two different numbers, so both are named. The target is what the move was
+    commanded to; the motor's answer is what the rail actually reports, and it
+    may differ from the target by up to VERIFY_TOLERANCE and still count as
+    reached. Printing the answer on its own called it the target position, which
+    named a number the preset does not contain - a blind saved as 70/30 reported
+    "reached target position (72.0%)".
+
+    The motor's answer is only added when it disagrees with the target. Where
+    they agree there is a single number, and repeating it says nothing.
+    """
+    label = "Top" if rail == RAIL_TOP else "Bottom"
+    head = f"{label} Rail reached target position ({target:.1f}%)"
+    if f"{motor:.1f}" == f"{target:.1f}":
+        return head
+    return f"{head}, motor reports {motor:.1f}%"
+
+
 class BlissClient:
     """Manage the BLE connection to one Bliss blind."""
 
@@ -175,22 +222,21 @@ class BlissClient:
         self._model: str | None = None
         self.motor_range = motor_range
         # From the options flow. ``connect_timeout`` is how long we keep trying
-        # to hear the motor; ``speed`` is the preset written before every move,
-        # one of slow/comfort/standard, and is always set.
+        # to hear the motor, and is always set.
         self.connect_timeout: float = CONNECT_TIMEOUT
-        # One of the three presets. There is deliberately no "leave the motor
-        # alone" value: the app offers no such choice either.
+        # One of the three presets the options form offers. This is the
+        # setting, not something a move carries: it reaches the motor only
+        # through async_set_speed, when the user changes it. There is
+        # deliberately no "leave the motor alone" value, because the app offers
+        # no such choice either.
         self.speed: str = DEFAULT_SPEED
-        # The last preset actually written to the motor, and therefore the one
-        # the motor is running at. The vendor app writes the speed once, when
-        # the user changes it on the speed screen, and never as part of a move:
-        # ``BlindSpeedOptions.getManualCommand()`` is invoked only from
-        # ``SettingsBlindSpeedScreenKt`` and ``BlindSpeedScreenKt``, both of
-        # which are the speed screens. The motor remembers the setting, so
-        # repeating the frame on every move would be a command the app never
-        # sends - and, on a write-with-response, a round trip added to every
-        # command for no effect.
-        self._speed_written: str | None = None
+        # The frame currently written and still inside its reply window, or
+        # None when nothing is pending. It exists so an arriving notification
+        # can be reported against what was in flight at that moment instead of
+        # without context. Only our own state is described: whether the motor
+        # answered us or spoke first is exactly what has to be read from the
+        # frame, not asserted about it.
+        self._awaiting: bytes | None = None
 
         # Safety switches. Movement is OFF until explicitly enabled.
         self.movement_enabled = False
@@ -223,6 +269,21 @@ class BlissClient:
         # notifications, so replies get attributed to the wrong request and
         # every one of them comes back empty.
         self._verify_lock = asyncio.Lock()
+        # Which is only half the story, and the half that was missing: that
+        # lock serialises one verification against another, but the cover
+        # platform's coordinator refresh calls async_request_status without
+        # ever taking it (cover.py). A cover command followed within seconds
+        # by a preset move therefore still put two polls on the wire together.
+        # On 2026-10-17 that cost a move the motor had taken to the exact
+        # target its UNVERIFIED verdict: polls went out at 00:02:34.776 and
+        # 00:02:36.692, the motor answered top 70.0 at 00:02:37.012 and bottom
+        # 30.0 at 00:02:37.014, and one second later each poll reported the
+        # other rail missing.
+        #
+        # Not _lock: a write connects on demand and async_connect takes _lock,
+        # so holding _lock across the write would deadlock - asyncio.Lock is
+        # not reentrant. Ordering stays _move_lock -> _write_lock -> _lock.
+        self._write_lock = asyncio.Lock()
         # Entities subscribe here so a position change is pushed to them. With
         # periodic polling off, nothing would otherwise re-read the cache - a
         # sync would update the motor's real position and leave the UI on
@@ -369,7 +430,23 @@ class BlissClient:
                 await asyncio.sleep(1.5)
 
     def _handle_notification(self, _sender, data: bytearray) -> None:
-        self._responses.put_nowait(bytes(data))
+        payload = bytes(data)
+        # Every frame the motor sends, named before it is queued, alongside what
+        # this integration was doing at the time. Neither half claims anything
+        # about the motor: whether a frame was asked for or volunteered is read
+        # from whether a query was outstanding, which is the distinction the
+        # vendor app's whole read model rests on and that nothing here logged.
+        _LOGGER.debug(
+            "%s: RX %s%s",
+            self.address,
+            payload.hex(" "),
+            (
+                f" (waiting on {self._awaiting.hex(' ')})"
+                if self._awaiting is not None
+                else " (nothing pending)"
+            ),
+        )
+        self._responses.put_nowait(payload)
 
     def async_setup_storage(self, entry_id: str) -> None:
         """Load persisted positions. Positions do not change on their own, so
@@ -474,8 +551,13 @@ class BlissClient:
 
         This is read from HA's cached service info, which exists only once
         something has connected through it, so None simply means "not yet".
+        Deliberately never raises: this is a diagnostic nicety, and a log line
+        that can throw takes the sync with it.
         """
-        info = bluetooth.async_last_service_info(self.hass, self.address)
+        try:
+            info = bluetooth.async_last_service_info(self.hass, self.address)
+        except Exception:  # noqa: BLE001 - a diagnostic must not break sync
+            return None
         if info is None:
             return None
         source = getattr(info, "source", None)
@@ -630,10 +712,18 @@ class BlissClient:
     # --- writes -------------------------------------------------------------
 
     async def _async_write(self, frame: bytes, wait: float = 1.5) -> list[bytes]:
-        """Write a frame and collect any notifications that follow."""
+        """Write a frame and collect any notifications that follow.
+
+        One write in flight at a time, and the lock is held across the reply
+        window as well as across the write. The queue is drained on entry and
+        then drawn from for the whole window, so a second write starting while
+        a first is still waiting takes the first write's replies - and both
+        come away with half an answer, or with none.
+        """
         self._cancel_idle_disconnect()
         try:
-            return await self._async_write_inner(frame, wait)
+            async with self._write_lock:
+                return await self._async_write_inner(frame, wait)
         finally:
             self._schedule_idle_disconnect()
 
@@ -648,31 +738,37 @@ class BlissClient:
 
         use_response = write_needs_response(client.services, COMMAND_CHARACTERISTIC_UUID)
 
+        # Named for the whole write and its reply window, so anything arriving
+        # in that time can be reported against the frame that asked for it.
+        self._awaiting = frame
         try:
-            await client.write_gatt_char(
-                COMMAND_CHARACTERISTIC_UUID, frame, response=use_response
-            )
-        except Exception as err:  # noqa: BLE001
-            self.available = False
-            mode = "with response" if use_response else "without response"
-            raise ConnectionError(
-                f"{self.address}: write ({mode}) of {frame.hex(' ')} failed: "
-                f"{type(err).__name__}: {err}"
-            ) from err
-
-        replies: list[bytes] = []
-        if wait > 0:
             try:
-                while True:
-                    replies.append(
-                        await asyncio.wait_for(self._responses.get(), timeout=wait)
-                    )
-                    # Keep listening: a status poll answers with one notification
-                    # per rail, separated by a short gap.
-                    wait = REPLY_GAP
-            except asyncio.TimeoutError:
-                pass
-        return replies
+                await client.write_gatt_char(
+                    COMMAND_CHARACTERISTIC_UUID, frame, response=use_response
+                )
+            except Exception as err:  # noqa: BLE001
+                self.available = False
+                mode = "with response" if use_response else "without response"
+                raise ConnectionError(
+                    f"{self.address}: write ({mode}) of {frame.hex(' ')} failed: "
+                    f"{type(err).__name__}: {err}"
+                ) from err
+
+            replies: list[bytes] = []
+            if wait > 0:
+                try:
+                    while True:
+                        replies.append(
+                            await asyncio.wait_for(self._responses.get(), timeout=wait)
+                        )
+                        # Keep listening: a status poll answers with one
+                        # notification per rail, separated by a short gap.
+                        wait = REPLY_GAP
+                except asyncio.TimeoutError:
+                    pass
+            return replies
+        finally:
+            self._awaiting = None
 
     # --- operations ---------------------------------------------------------
 
@@ -694,6 +790,13 @@ class BlissClient:
 
         The BLE link is held across the whole move *and* its verification:
         dropping it while the motor is still travelling makes the blind stop.
+
+        There is no speed parameter, and that is deliberate rather than an
+        omission. The only thing a speed argument could do is put a speed frame
+        in front of the move, and on real hardware that frame beeps the blind
+        and shifts it about 2% (72.0/27.4 against 70.1/30.0 from the same
+        origin, on the same command). The Speed setting is written by its own
+        path - ``async_set_speed``, from the options flow.
         """
         self._cancel_idle_disconnect()
         try:
@@ -746,8 +849,19 @@ class BlissClient:
                 )
                 result["superseded"] = True
                 return
-            observed = await self._async_verify_positions(
-                expected=expected, seq=result["seq"]
+            # A single-rail frame says nothing about the other rail, so only
+            # the rail that was commanded may be judged - by the wait itself,
+            # not only by the comparison at the end.
+            rails = (
+                (result["adjust"],)
+                if result.get("adjust")
+                else (RAIL_TOP, RAIL_BOTTOM)
+            )
+            observed, settled = await self._async_verify_positions(
+                expected=expected,
+                seq=result["seq"],
+                origin=result.get("from"),
+                rails=rails,
             )
         result["observed"] = observed
 
@@ -761,20 +875,39 @@ class BlissClient:
             result["superseded"] = True
             return
 
-        # A single-rail frame says nothing about the other rail, so only the
-        # rail that was commanded can be judged.
-        rails = (
-            (result["adjust"],)
-            if result.get("adjust")
-            else (RAIL_TOP, RAIL_BOTTOM)
+        # No verdict while a rail is still running: a position read in flight
+        # is a distance left to travel, not an outcome, and comparing it with
+        # the target would blame the motor for a move that is not over.
+        matches = (
+            self._compare(expected=expected, observed=observed, rails=rails)
+            if settled
+            else None
         )
-        matches = self._compare(expected=expected, observed=observed, rails=rails)
         result["matches"] = matches
         result["verified"] = matches is not None
 
+        if observed and not settled:
+            # Still running when the waiting budget ran out. Health is left
+            # alone deliberately: the health sensor is failures only, and a
+            # blind that is still on its way has not failed anything. What is
+            # said is that the move could not be confirmed - true whether it
+            # arrives a second later or never.
+            _LOGGER.warning(
+                "%s: move sent (%s) but the last read (%s) had not reached the "
+                "target, so the result is UNVERIFIED.",
+                self.address,
+                ", ".join(
+                    f"{rail}={expected[0] if rail == RAIL_TOP else expected[1]}"
+                    for rail in rails
+                ),
+                {
+                    rail: (info.get("position_percent") if info else None)
+                    for rail, info in observed.items()
+                },
+            )
         # None means "could not tell" - never True. Reporting success when
         # nothing was observed is the one failure mode a guard must not have.
-        if matches is None:
+        elif matches is None:
             self.note_health(
                 HEALTH_NO_FEEDBACK,
                 f"motor returned no position for {result.get('adjust') or 'both'} rail",
@@ -791,11 +924,18 @@ class BlissClient:
         elif matches:
             # The other outcomes log a warning, so without this a normal move
             # looks identical to one that was never confirmed. The motor read
-            # back the position it was told to go to, and that is the one thing
-            # worth saying at INFO: it is evidence the command landed.
-            reached = ", ".join(
-                f"{'Top' if rail == RAIL_TOP else 'Bottom'} Rail reached target "
-                f"position ({(observed.get(rail) or {}).get('position_percent', expected[0] if rail == RAIL_TOP else expected[1]):.1f}%)"
+            # back a position within tolerance of what it was told, and that is
+            # the one thing worth saying at INFO: it is evidence the command
+            # landed. Both numbers are given, because the reading and the target
+            # are not the same number - only the target is what was asked for.
+            # `matches` is True only when _compare saw a position for every
+            # rail in `rails`, so each lookup below has its entry.
+            reached = "; ".join(
+                describe_reach(
+                    rail,
+                    expected[0] if rail == RAIL_TOP else expected[1],
+                    float(observed[rail]["position_percent"]),
+                )
                 for rail in rails
             )
             _LOGGER.info("%s: %s", self.name, reached)
@@ -901,6 +1041,17 @@ class BlissClient:
         # you to ignore the log, which is exactly where the real warnings are.
         rail = adjust if adjust is not None else "both"
         was = self.position.get(rail) if rail in (RAIL_TOP, RAIL_BOTTOM) else None
+        # Where each rail actually was at the moment this command goes out.
+        #
+        # The cache is overwritten with the *target* just after the write, so
+        # this is the only place the starting point survives - and verification
+        # needs it, because "somewhere between here and there" is the one thing
+        # that proves a read is describing a blind that has not finished
+        # moving rather than one that stopped in the wrong place.
+        origin = {
+            RAIL_TOP: self.position.get(RAIL_TOP),
+            RAIL_BOTTOM: self.position.get(RAIL_BOTTOM),
+        }
         if rail == "both":
             _LOGGER.info(
                 "%s: Moving Top Rail to %.1f%% and Bottom Rail to %.1f%%%s",
@@ -925,20 +1076,32 @@ class BlissClient:
             frame.hex(" "),
             " (FORCED, rail guard skipped)" if force else "",
         )
+        # What Home Assistant held for this blind when the frame was built, and
+        # how long ago the motor itself last said otherwise. A gap between the
+        # two is the one thing that would make a blind start from somewhere
+        # nobody has confirmed.
+        top0 = origin[RAIL_TOP]
+        bottom0 = origin[RAIL_BOTTOM]
+        seen = self.seconds_since_seen()
+        _LOGGER.debug(
+            "%s: ORIGIN top=%s bottom=%s, motor last answered %s",
+            self.address,
+            "unknown" if top0 is None else f"{top0:.1f}%",
+            "unknown" if bottom0 is None else f"{bottom0:.1f}%",
+            "never" if seen is None else f"{seen}s ago",
+        )
         self._move_seq += 1
         try:
-            # The vendor app sends the preset as its own command before a move
-            # - but only when it has changed. The app's getManualCommand() is
-            # invoked from its speed screens and never from a move path, so it
-            # sets the speed once and lets the motor remember it. Mirroring
-            # that means a user who picks Comfort gets one frame, not one per
-            # move, and a user who never changes anything gets none at all
-            # after the first.
-            if self.speed != self._speed_written:
-                await self._async_write(build_speed(self.speed), wait=0.0)
-                # Only recorded on success: a failed write must retry on the
-                # next move rather than being silently remembered as sent.
-                self._speed_written = self.speed
+            # The speed preset is not sent here, and that is the design rather
+            # than a placeholder for a later version. v1.4 put a speed frame in
+            # front of every move; a diff against v1.2 and v1.3 showed that
+            # insert was the only thing on the wire that differed, and a
+            # matched pair on real hardware showed it beeping the blind and
+            # shifting it about 2% (72.0/27.4 against 70.1/30.0 from the same
+            # origin, on the same command). The Speed setting is written by
+            # its own path - async_set_speed, from the options flow - and
+            # never as part of a move. Nothing that reaches this function can
+            # ask for a speed frame: there is no speed parameter to pass.
             await self._async_write(frame)
         except ConnectionError as err:
             # With write-with-response, a lost acknowledgement is
@@ -947,7 +1110,7 @@ class BlissClient:
             # failed. Ask the motor where it actually is before believing the
             # error - the same rule as never claiming success without evidence,
             # applied to failure.
-            if not await self._async_move_landed(top, bottom, adjust):
+            if not await self._async_move_landed(top, bottom, adjust, origin):
                 self.note_health(HEALTH_MOVE_FAILED, str(err))
                 raise
             _LOGGER.warning(
@@ -980,26 +1143,36 @@ class BlissClient:
             "clamped": clamped,
             "adjust": adjust,
             "seq": self._move_seq,
+            # Where the rails were when it was sent, so verification can tell a
+            # read taken in flight from one taken at rest.
+            "from": origin,
         }
         return result
 
     async def _async_move_landed(
-        self, top: float, bottom: float, adjust: str | None
+        self,
+        top: float,
+        bottom: float,
+        adjust: str | None,
+        origin: dict | None = None,
     ) -> bool:
         """Did the motor actually go where it was told, despite a write error?
 
         Only the rail that was commanded is checked, for the same reason
         verification is: a single-rail frame says nothing about the other rail.
 
-        Returns False when the motor cannot be reached at all. That is the
-        honest answer - no evidence either way means the move cannot be called
-        successful, so the original error stands.
+        Returns False when the motor cannot be reached at all, and also when it
+        is still travelling. A blind on its way has not landed, and calling
+        that a success would be the same guess this whole check exists to
+        avoid. Either way the original error stands.
         """
         rails: tuple[str, ...] = (adjust,) if adjust else (RAIL_TOP, RAIL_BOTTOM)
-        wanted = {RAIL_TOP: top, RAIL_BOTTOM: bottom}
         try:
-            observed = await self._async_verify_positions(
-                expected=(top, bottom), seq=self._move_seq
+            observed, settled = await self._async_verify_positions(
+                expected=(top, bottom),
+                seq=self._move_seq,
+                origin=origin,
+                rails=rails,
             )
         except Exception:  # noqa: BLE001 - a failed poll answers nothing
             _LOGGER.debug(
@@ -1008,7 +1181,7 @@ class BlissClient:
                 self.address,
             )
             return False
-        if not observed:
+        if not observed or not settled:
             return False
         return self._compare(expected=(top, bottom), observed=observed, rails=rails) is True
 
@@ -1017,8 +1190,84 @@ class BlissClient:
         expected: tuple[float, float],
         attempts: int = VERIFY_ATTEMPTS,
         seq: int | None = None,
+        origin: dict | None = None,
+        rails: tuple[str, ...] = (RAIL_TOP, RAIL_BOTTOM),
+    ) -> tuple[dict, bool]:
+        """Poll the motor until its answer can be judged, or the budget runs out.
+
+        Returns ``(observed, settled)``.
+
+        ``settled`` is what separates an honest verdict from an accusation. The
+        first read happens 1.5s after the command, and a blind still travelling
+        reports where it *was*, not where it stopped: commanded 70/30 it read
+        back top=72.4, bottom=24.8 - both between where they started and where
+        they were going - and was called a motor going to a wrong position when
+        it had simply not finished. Compare that read with the target and the
+        blind is blamed for its own travel.
+
+        A read counts as settled when it has reached the target, when two reads
+        in a row agree (the rail has stopped), or when no rail can be shown to
+        still be between its starting point and its target - there being
+        nothing left to wait for. Otherwise keep reading; if that runs out,
+        return ``settled=False``. Unconfirmed is true either way, a wrong
+        position is only true if the blind actually stopped there.
+
+        An empty first read behaves exactly as it always has: retry, then
+        report that the motor said nothing.
+        """
+        observed = await self._async_first_status_read(attempts=attempts, seq=seq)
+        if not observed:
+            return {}, False
+        if self._compare(expected=expected, observed=observed, rails=rails) is True:
+            return observed, True
+        if not self._in_transit(
+            origin=origin, observed=observed, expected=expected, rails=rails
+        ):
+            # Nothing can be shown to be moving, so this read is the final
+            # answer - even when it is the wrong one. That is what lets a
+            # genuine mismatch be reported off a single read, as always.
+            return observed, True
+
+        for attempt in range(VERIFY_SETTLE_ATTEMPTS):
+            if seq is not None and seq != self._move_seq:
+                return {}, False
+            await asyncio.sleep(VERIFY_RETRY_DELAY)
+            try:
+                read = await self.async_request_status()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "%s: settle poll %d/%d failed: %s",
+                    self.address,
+                    attempt + 1,
+                    VERIFY_SETTLE_ATTEMPTS,
+                    err,
+                )
+                continue
+            if not read:
+                # Silence decides nothing either way: a travelling motor may
+                # not answer, and neither may one that has only just stopped.
+                _LOGGER.debug(
+                    "%s: settle poll %d/%d returned nothing",
+                    self.address,
+                    attempt + 1,
+                    VERIFY_SETTLE_ATTEMPTS,
+                )
+                continue
+            if self._positions_agree(left=observed, right=read, rails=rails):
+                return read, True  # stopped, wherever it stopped
+            observed = read
+            if self._compare(expected=expected, observed=observed, rails=rails) is True:
+                return observed, True  # arrived
+            if not self._in_transit(
+                origin=origin, observed=observed, expected=expected, rails=rails
+            ):
+                return observed, True  # no longer on its way: judge it
+        return observed, False
+
+    async def _async_first_status_read(
+        self, attempts: int = VERIFY_ATTEMPTS, seq: int | None = None
     ) -> dict:
-        """Poll for the motor's positions after a move, with retries.
+        """Poll until the motor answers once, or the retry budget runs out.
 
         A motor that is still travelling may not answer a status poll, so a
         single empty poll proves nothing. Retry a few times before concluding
@@ -1051,6 +1300,64 @@ class BlissClient:
                 attempts,
             )
         return {}
+
+    @staticmethod
+    def _positions_agree(
+        left: dict, right: dict, rails: tuple[str, ...] = (RAIL_TOP, RAIL_BOTTOM)
+    ) -> bool:
+        """Did every judged rail read the same both times, near enough?
+
+        A complete answer is required. Half a reply cannot show that anything
+        stopped, and settling on the rail that happened to arrive would judge
+        the move by the other rail's absence.
+        """
+        for rail in rails:
+            a = (left.get(rail) or {}).get("position_percent")
+            b = (right.get(rail) or {}).get("position_percent")
+            if a is None or b is None:
+                return False
+            if abs(float(a) - float(b)) > VERIFY_STABLE_EPSILON:
+                return False
+        return bool(rails)
+
+    @staticmethod
+    def _in_transit(
+        origin: dict | None,
+        observed: dict,
+        expected: tuple[float, float],
+        rails: tuple[str, ...] = (RAIL_TOP, RAIL_BOTTOM),
+    ) -> bool:
+        """Is any judged rail still between where it was and where it is going?
+
+        Arithmetic, not a guess about how long a blind takes. A position
+        between the two has not arrived, so there is nothing to judge yet -
+        the number is distance still to travel rather than a result.
+
+        A read still at the starting point counts too. The first read happens
+        1.5s after the command, and a motor that has not begun to move reads
+        exactly where it was: calling that "not moving towards the target" and
+        comparing it there would blame the motor for a move it had not started.
+
+        False when nothing can be shown to be travelling. An unknown starting
+        point proves nothing and must not be read as proof that the move is
+        over: that is the case in which a single read is taken as final, exactly
+        as it was before any of this existed.
+        """
+        if not observed:
+            return False
+        wanted = {RAIL_TOP: expected[0], RAIL_BOTTOM: expected[1]}
+        for rail in rails:
+            start = (origin or {}).get(rail)
+            got = (observed.get(rail) or {}).get("position_percent")
+            if start is None or got is None:
+                continue
+            start_f, goal_f, got_f = float(start), float(wanted[rail]), float(got)
+            if start_f == goal_f:
+                continue  # nothing for this rail to travel
+            low, high = sorted((start_f, goal_f))
+            if low < got_f < high or got_f == start_f:
+                return True
+        return False
 
     @staticmethod
     def _compare(
@@ -1137,8 +1444,28 @@ class BlissClient:
         self._schedule_save()
         self.notify_listeners()
 
-    async def async_set_speed(self, percent: int) -> None:
-        await self._async_write(build_speed(percent), wait=0.0)
+    async def async_set_speed(self, preset: str) -> None:
+        """Write the motor's speed preset, as a frame of its own.
+
+        ``preset`` is one of ``slow`` / ``comfort`` / ``fast`` - the same
+        values the options form offers and ``client.speed`` holds, so what is
+        sent is what is stored with nothing left to translate in between.
+
+        Never called from a move path. v1.4 put a speed frame in front of every
+        move and the blind beeped; writing one with no move after it beeps it
+        too, so the beep is the frame's own doing and not an interaction with
+        the move behind it. This runs once, when the setting changes - which is
+        also the only place the vendor app writes it.
+        """
+        frame = build_speed(preset)
+        _LOGGER.debug("%s: TX speed %s", self.address, frame.hex(" "))
+        # wait=0.0: the caller does not hold the write open for the reply. The
+        # motor does answer this frame - measured on hardware at 64 ms, as
+        # ``ff 01 02 03 de f2 01 00 00``, echoing the opcode and the preset -
+        # so the notification still arrives and is logged against the frame it
+        # belongs to. Nothing here reads it, so treating it as required would
+        # only turn a motor that answered late into a reported failure.
+        await self._async_write(frame, wait=0.0)
 
     async def async_set_clock(self, when: datetime | None = None) -> None:
         await self._async_write(build_set_clock(when), wait=0.0)
@@ -1151,7 +1478,12 @@ class BlissClient:
         the bottom. Both must be collected; an earlier single-reply window only
         ever saw the top rail and silently reported no bottom position.
         """
-        replies = await self._async_write(build_read_status(), wait=REPLY_WINDOW)
+        # Said before it goes out: this is the frame the official app sends only
+        # while the motor is at rest, and how often it leaves here is exactly
+        # what has to be visible to say anything about a beep.
+        poll = build_read_status()
+        _LOGGER.debug("%s: TX readStatus %s", self.address, poll.hex(" "))
+        replies = await self._async_write(poll, wait=REPLY_WINDOW)
         parsed: dict[str, dict] = {}
 
         if replies:
@@ -1210,6 +1542,7 @@ class BlissClient:
         cached positions are left exactly as they were.
         """
         self._begin_sync()
+        started = time.monotonic()
         for attempt in range(1, attempts + 1):
             parsed = await self.async_request_status()
             if parsed:
@@ -1262,15 +1595,20 @@ class BlissClient:
                     delay,
                 )
                 await asyncio.sleep(delay)
+        if self.last_seen is None:
+            heard = "Never heard from before"
+        else:
+            heard = f"Last heard from {self.seconds_since_seen():.0f}s ago"
         _LOGGER.warning(
-            "%s: sync got no reply after %d attempts. A blind accepts only ONE "
-            "Bluetooth connection, so the likeliest cause is something else "
-            "holding it: the Hunter Douglas app open on a phone, or this same "
-            "blind configured in another integration. Positions are unchanged. "
-            "Close the app, remove any duplicate setup, and if it really is just "
-            "asleep then a move wakes it.",
-            self.address,
+            "%s: sync got no reply after %d attempts over %.1fs, and every "
+            "attempt connected. %s via %s. Positions are unchanged. A blind "
+            "accepts only one Bluetooth connection, so a second holder is one "
+            "thing that leaves open; a motor that never woke is the other.",
+            self.name,
             attempts,
+            time.monotonic() - started,
+            heard,
+            self.async_get_service_source() or "an unknown proxy",
         )
         # Left in Syncing rather than forced to OK: a silent motor is not proof
         # that nothing is wrong, and the Health sensor answering "OK" after a
