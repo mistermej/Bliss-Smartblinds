@@ -61,6 +61,8 @@ def _device_friendly_name(device) -> str | None:
     return _APPENDED_ADDRESS.sub("", str(name)) or str(name)
 
 
+from .options import preset_at, presets_of
+from .protocol import RAIL_BOTTOM, RAIL_TOP
 from .const import (
     BATTERY_EMPTY,
     BATTERY_LABELS,
@@ -91,18 +93,25 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the battery and RSSI sensors for one blind."""
+    """Set up the battery, RSSI, position and other sensors for one blind."""
     client: BlissClient = hass.data[DOMAIN][entry.entry_id]
+    presets = presets_of(dict(entry.options or {}))
 
-    async_add_entities(
-        [
-            BlissHealthSensor(client, entry),
-            BlissBatterySensor(client, entry),
-            BlissRssiSensor(client, entry),
-            BlissConnectionSensor(client, entry),
-            BlissProxySensor(client, entry),
-        ]
-    )
+    entities = [
+        BlissHealthSensor(client, entry),
+        BlissBatterySensor(client, entry),
+        BlissRssiSensor(client, entry),
+        BlissConnectionSensor(client, entry),
+        BlissProxySensor(client, entry),
+    ]
+
+    # Only with presets to report, since "Custom" alone would say nothing the
+    # covers do not already say. It appears on its own once one is added,
+    # because editing the options reloads the entry and this runs again.
+    if presets:
+        entities.append(BlissPositionSensor(client, entry, presets))
+
+    async_add_entities(entities)
 
 
 class _BlissSensorBase(SensorEntity):
@@ -445,3 +454,58 @@ class BlissRssiSensor(_BlissSensorBase):
     @property
     def native_value(self) -> int | None:
         return self.client.async_get_rssi()
+
+# --- position ---------------------------------------------------------------
+
+# How close a rail has to be to count as being on a preset lives in options.py,
+# next to the one other entity that reads it - the selector and this sensor
+# have to agree about which preset a set of rails is, or a dashboard shows one
+# thing twice over and contradicts itself.
+
+
+class BlissPositionSensor(_BlissSensorBase):
+    """Which saved position the blind is currently at, or Custom.
+
+    Answers the question a preset creates: a blind can be sent to a saved
+    position, and now it can be seen which one it is at. Move a rail by hand
+    or with the remote and it says Custom.
+
+    Derived rather than remembered. Nothing fires an event when a blind is
+    moved by its own remote, so a stored state would disagree with where the
+    rails actually are; reading the live positions against the presets
+    cannot drift from them.
+    """
+
+    _key = "position"
+    _attr_name = "Position"
+    _attr_translation_key = "position"
+    _attr_icon = "mdi:blinds-horizontal"
+
+    def __init__(
+        self, client: BlissClient, entry: ConfigEntry, presets: dict
+    ) -> None:
+        super().__init__(client, entry)
+        self._presets = presets
+
+    @property
+    def native_value(self) -> str:
+        name = preset_at(self.client.position, self._presets)
+        if name is not None:
+            return name
+
+        position = self.client.position
+        # Not yet read: the blind has not answered since this was added. That
+        # is not the same as being somewhere no preset reaches, and a blind
+        # that has never answered must not read as Custom.
+        if position.get(RAIL_TOP) is None or position.get(RAIL_BOTTOM) is None:
+            return "Unknown"
+
+        return "Custom"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """The rails as read, so a Custom position is actionable."""
+        return {
+            "top": self.client.position.get(RAIL_TOP),
+            "bottom": self.client.position.get(RAIL_BOTTOM),
+        }

@@ -23,6 +23,65 @@
       "no_discovery_info": "The details of this blind were lost before it could be added. Wait for it to be discovered again, or add it by hand."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Bliss blind settings",
+        "description": "Applies to this blind only.",
+        "menu_options": {
+          "settings": "Settings",
+          "preset_add": "Add a preset",
+          "preset_change": "Change or delete a preset"
+        }
+      },
+      "settings": {
+        "title": "Blind settings",
+        "description": "Applies to this blind only.",
+        "data": {
+          "maintenance_mode": "Maintenance Mode",
+          "connect_timeout": "Timeout",
+          "speed": "Speed"
+        },
+        "data_description": {
+          "maintenance_mode": "ON makes this blind read-only: position, battery and health still update, but it cannot be moved.",
+          "connect_timeout": "How long to keep trying to reach the motor before giving up, in seconds.",
+          "speed": "The speed this blind moves at: Slow, Comfort or Standard."
+        }
+      },
+      "preset_add": {
+        "title": "Add a preset",
+        "description": "Give the preset a name and both rail positions.\nTop has to sit above bottom - Home Assistant refuses a position that would drive the rails into each other.",
+        "data": {
+          "name": "Name",
+          "top": "Top Position",
+          "bottom": "Bottom Position"
+        },
+        "data_description": {
+          "name": "What this preset is called.",
+          "top": "Where the top rail stops, as a percentage of its travel.",
+          "bottom": "Where the bottom rail stops, as a percentage of its travel."
+        }
+      },
+      "preset_change": {
+        "title": "Change or delete a preset",
+        "description": "Leave a field blank to keep what is saved for it.\n\n{presets}",
+        "data": {
+          "preset": "Preset",
+          "name": "Name",
+          "top": "Top Position",
+          "bottom": "Bottom Position",
+          "delete": "Delete this preset"
+        },
+        "data_description": {
+          "preset": "The preset to change - or the one to remove, if the box below is ticked.",
+          "name": "Leave blank to keep the name it has.",
+          "top": "Leave blank to keep the saved top position.",
+          "bottom": "Leave blank to keep the saved bottom position.",
+          "delete": "Removes the chosen preset instead of saving any changes to it."
+        }
+      }
+    }
+  },
   "entity": {
     "cover": {
       "top": {
@@ -47,24 +106,14 @@
       },
       "health": {
         "name": "Health"
+      },
+      "position": {
+        "name": "Position"
       }
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Bliss blind settings",
-        "description": "Applies to this blind only.",
-        "data": {
-          "maintenance_mode": "Maintenance Mode",
-          "connect_timeout": "Connection timeout",
-          "speed": "Blind speed"
-        },
-        "data_description": {
-          "maintenance_mode": "ON makes this blind read-only: position, battery and health still update, but it cannot be moved. Off is normal behaviour.",
-          "connect_timeout": "How long to keep trying to reach the motor before giving up. Raise it if a blind often fails with 'Cannot find blind'; lower it to give up faster.",
-          "speed": "Speed used for every move. Slow is the slowest, Comfort the regular, and Standard the fastest of the three."
-        }
+    },
+    "select": {
+      "preset": {
+        "name": "Preset"
       }
     }
   }

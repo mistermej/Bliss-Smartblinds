@@ -38,7 +38,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up the two covers for one blind."""
     client: BlissClient = hass.data[DOMAIN][entry.entry_id]
-    client.async_setup_storage(entry.entry_id)
+
+    # Storage is deliberately not set up here. It was, and that made setup load
+    # the saved positions twice: once in async_setup_entry, before the blind is
+    # connected and read, and again here - which is *after* that read, so the
+    # second load replaced the motor's real positions with the ones saved at the
+    # last restart. async_setup_entry is the only caller, and it runs first.
 
     coordinator: DataUpdateCoordinator = DataUpdateCoordinator(
         hass,

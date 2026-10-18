@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from copy import deepcopy
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
@@ -43,7 +44,7 @@ SPEED_LABELS,
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
-PLATFORMS = ["cover", "sensor", "button"]
+PLATFORMS = ["cover", "sensor", "button", "select"]
 
 # Read-only: this action only ever sends the status-poll frame, which the
 # motor answers with where its rails are. It cannot drive a motor, which is
@@ -182,7 +183,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # thinks to sync it. Read-only, and best effort: a sleepy motor that
         # does not answer here can be synced later.
         try:
-            await client.async_request_status()
+            status = await client.async_request_status()
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
                 "%s: initial sync did not answer (%s); "
@@ -191,9 +192,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 err,
             )
         else:
-            _LOGGER.info(
-                "%s: initial sync read positions %s", address, client.position
-            )
+            # async_request_status returns {} rather than raising when the
+            # motor stays quiet, and at this point client.position holds the
+            # values storage has just restored. Printing that cache claimed the
+            # motor had reported them, so the line is built from the reply
+            # alone: a rail the motor did not answer is not printed as if it
+            # had. "reported no positions" is used rather than "no reply"
+            # because a reply that does not decode to a rail is still a reply.
+            if status:
+                _LOGGER.info(
+                    "%s: initial sync read positions %s",
+                    address,
+                    {
+                        rail: info["position_percent"]
+                        for rail, info in status.items()
+                    },
+                )
+            else:
+                _LOGGER.debug(
+                    "%s: initial sync reported no positions; "
+                    "use the sync service when the blind is awake",
+                    address,
+                )
 
     hass.data[DOMAIN][entry.entry_id] = client
 
@@ -225,7 +245,15 @@ def _sync_device_name(hass: HomeAssistant, entry: ConfigEntry) -> None:
     anything an integration writes, so their choice wins and this does nothing.
     """
     dev_reg = dr.async_get(hass)
-    device = dev_reg.async_get_device(identifiers=_identifiers(entry))
+    # async_get_device is deprecated from Home Assistant 2026.8 - identifiers
+    # and connections are no longer unique across config entries - and stops
+    # working in 2027.8. async_get_devices reads the same index, so it finds
+    # exactly what that found; ours can match at most one device anyway,
+    # because the identifier carries this entry's id. That one exists only from
+    # 2026.8, which is why hacs.json declares 2026.8.0 as the floor - see
+    # tests/test_entry_title_sync.py for the table it is checked against.
+    devices = dev_reg.async_get_devices(identifiers=_identifiers(entry))
+    device = devices[0] if devices else None
     if device is None:
         # The device only exists once a platform has set up its first entity,
         # so a blind with no entities yet has nothing to sync into.
@@ -283,23 +311,36 @@ def _async_watch_device_renames(
 
 
 
+def _remembered_options(hass: HomeAssistant, entry: ConfigEntry) -> dict | None:
+    """The options recorded when this entry was last set up, or None.
+
+    Home Assistant fires the update listeners for *any* change to an entry -
+    a rename, a version bump - not only for options, so "what changed" has to
+    be measured against a recorded copy rather than against the entry itself.
+    """
+    return hass.data.get(DOMAIN, {}).get(f"__options__{entry.entry_id}")
+
+
 def _options_changed(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Whether the options actually differ from the ones last applied.
 
-    Home Assistant fires the update listeners for *any* change to an entry -
-    a rename, a version bump - not only for options. Reloading on all of them
-    meant the cosmetic title write the device-rename listener makes tore the
-    BLE connection down and reconnected for nothing: a rename is not a reason
-    to drop the link to the motor.
+    Reloading on every listener call meant the cosmetic title write the
+    device-rename listener makes tore the BLE connection down and reconnected
+    for nothing: a rename is not a reason to drop the link to the motor.
     """
-    last = hass.data.get(DOMAIN, {}).get(f"__options__{entry.entry_id}")
-    return last != dict(entry.options)
+    return _remembered_options(hass, entry) != dict(entry.options)
 
 
 def _remember_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Record the options currently applied, for _options_changed above."""
-    hass.data.setdefault(DOMAIN, {})[f"__options__{entry.entry_id}"] = dict(
-        entry.options
+    """Record the options currently applied, for _options_changed above.
+
+    A deep copy on purpose. The presets block is a dict inside the options
+    dict, and a shallow one would share it - so anything that edited a preset
+    in place would leave the remembered copy already matching, and the change
+    would never trigger the reload that re-derives the preset list.
+    """
+    hass.data.setdefault(DOMAIN, {})[f"__options__{entry.entry_id}"] = deepcopy(
+        dict(entry.options)
     )
 
 
@@ -311,9 +352,68 @@ async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
     if not _options_changed(hass, entry):
         return
+
+    # Read before the reload, not after: _apply_options runs during setup, so
+    # afterwards this would already hold the new value and the two would always
+    # compare equal - the write would never fire, and a speed setting that
+    # silently does nothing is the worst outcome a setting can have.
+    was_speed = _speed_of(dict(_remembered_options(hass, entry) or {}))
+    now_speed = _speed_of(dict(entry.options))
+
     await hass.config_entries.async_reload(entry.entry_id)
 
+    # After the reload and not before: the reload creates the client, and the
+    # setup it runs has already connected and read the motor's position. A
+    # write scheduled earlier would race that first sync for the link.
+    if was_speed != now_speed:
+        _schedule_speed_write(hass, entry, now_speed)
 
+
+def _schedule_speed_write(hass: HomeAssistant, entry: ConfigEntry, speed: str) -> None:
+    """Write the new speed to the motor, in the background.
+
+    Scheduled rather than awaited: a write connects on demand and the connect
+    timeout is 45 s, so awaiting here would hold the options form open for up
+    to that long to put one frame on the wire.
+    """
+    client = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if client is None:
+        # Nothing to write to. The setting is still stored, and the next setup
+        # applies it, so this is not worth a warning.
+        return
+    hass.async_create_task(_write_speed(client, speed))
+
+
+async def _write_speed(client: BlissClient, speed: str) -> None:
+    """Put the speed frame on the wire, and say plainly whether it went."""
+    try:
+        await client.async_set_speed(speed)
+    except Exception as err:  # noqa: BLE001 - one frame, and the outcome matters
+        _LOGGER.warning(
+            "%s: speed setting changed to %s, frame not sent: %s",
+            client.address,
+            speed,
+            err,
+        )
+    else:
+        _LOGGER.debug(
+            "%s: speed setting changed to %s, frame sent", client.address, speed
+        )
+
+
+
+
+def _speed_of(options: dict) -> str:
+    """The speed an options dict selects, folded onto a real preset.
+
+    A value stored by an earlier version - when "motor default" existed - is
+    not a preset, and passing it to build_speed() would raise. Folding it onto
+    the default here means one function decides what the speed is, used both to
+    apply the options and to detect that they changed, so the two can never
+    disagree and send a frame for something that is not a preset.
+    """
+    speed = str(options.get(CONF_SPEED, DEFAULT_SPEED))
+    return speed if speed in SPEED_CHOICES else DEFAULT_SPEED
 
 
 def _apply_options(client: BlissClient, options: dict) -> None:
@@ -329,12 +429,7 @@ def _apply_options(client: BlissClient, options: dict) -> None:
     client.connect_timeout = float(
         options.get(CONF_CONNECT_TIMEOUT, DEFAULT_CONNECT_TIMEOUT)
     )
-    # Always one of the three presets. A value stored by an earlier version
-    # (when "motor default" existed) is not a preset and would make
-    # build_speed() raise mid-move, so it is folded onto the default
-    # rather than trusted.
-    speed = str(options.get(CONF_SPEED, DEFAULT_SPEED))
-    client.speed = speed if speed in SPEED_CHOICES else DEFAULT_SPEED
+    client.speed = _speed_of(options)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 DOMAIN = "bliss_smartblinds"
 LOGGER_NAME = f"custom_components.{DOMAIN}"
 
@@ -22,10 +20,9 @@ CONF_MAINTENANCE_MODE = "maintenance_mode"
 # long we have been waiting is what decides whether one was heard, and "3 tries"
 # means anything from four seconds to a minute depending on the proxy.
 CONF_CONNECT_TIMEOUT = "connect_timeout"
-# Motor speed preset, sent as its own frame before a move. "default"
-# means "leave the motor's own setting alone", which is the default -
-# movement works without it, and a user who has not asked for a preset
-# should not have frames written that they did not request.
+# Motor speed preset, written to the motor as a frame of its own when the
+# setting changes - never as part of a move, because the frame that v1.4
+# put in front of every move beeps the blind and shifts it about 2%.
 #
 # The three presets are the app's own, from the ``BlindSpeedOptions``
 # enum in ``models/BlindSpeedOptions.smali``, which has exactly three
@@ -43,6 +40,7 @@ SPEED_CHOICES = ("slow", "comfort", "fast")
 # "Standard" - the app's name for this preset - is the default, because it is
 # the one a blind arrives from the factory running at.
 DEFAULT_SPEED = "fast"
+
 SPEED_LABELS = {
     "slow": "Slow",
     "comfort": "Comfort",
@@ -56,6 +54,31 @@ SPEED_LABELS = {
 DEFAULT_CONNECT_TIMEOUT = 45
 CONNECT_TIMEOUT_MIN = 5
 CONNECT_TIMEOUT_MAX = 300
+
+# Position presets, stored in the entry's options so they live in Home Assistant
+# rather than on the motor. A preset is a name plus the two rail positions -
+# per blind, because a rail percentage is a physical position on one specific
+# motor. There is no speed in a preset: the only thing that could have used one
+# is a speed frame ahead of a move, which beeps the blind and shifts it about
+# 2%. A blind's speed is a setting of its own.
+#
+# Stored here rather than in the motor's own favourite slots because that keeps
+# them reversible, allows as many as you like, and needs no write protocol
+# verified against hardware.
+CONF_PRESETS = "presets"
+
+# The three fields of one stored preset. The name is the key in the presets
+# block, and the two positions live inside it:
+#   {"Lights out": {"top": 100, "bottom": 0}}
+CONF_PRESET_NAME = "name"
+CONF_PRESET_TOP = "top"
+CONF_PRESET_BOTTOM = "bottom"
+# Which preset the dropdown is pointing at. Never stored - it is the question
+# the form is asking, not part of the answer.
+CONF_PRESET_PICK = "preset"
+# Tick to remove that preset instead of saving changes to it. Also never
+# stored: it is what the Submit should *do*, not something to keep.
+CONF_PRESET_DELETE = "delete"
 
 # --- GATT (presentation/util/BleCharacteristics.kt) --------------------------
 SERVICE_UUID = "00010203-0405-0607-0809-0a0b0c0d1910"

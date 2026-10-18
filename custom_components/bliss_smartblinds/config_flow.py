@@ -181,19 +181,16 @@ class BlissConfigFlow(ConfigFlow, domain=DOMAIN):
 
         # Deliberately an *empty* schema rather than none at all.
 
-        # Home Assistant's own Name-and-area dialog asks the questions this
-        # screen should not: asking for a name here as well meant typing it
-        # twice, once in each popup.
-
-        # Dropping the field outright also stopped that dialog appearing, and
-        # the correlation across three rounds was exact - a confirm form with a
-        # data_schema led to Home Assistant's Name-and-area screen, and a form
-        # without one led to nothing at all. So the schema stays, with nothing
-        # in it. No name is asked of the user, and the stock dialog still
-        # follows.
+        # No name field here: Home Assistant's own Name-and-area dialog asks
+        # the name and the area together, and a field of ours split that into
+        # two popups. No data_schema either - HA's async_show_form takes
+        # data_schema=None as a supported option, so an empty Schema bought
+        # nothing. (An earlier build carried one on the theory that it made
+        # the Name-and-area dialog appear; HA's source does not support that,
+        # so it is gone and only a run on a real install can say whether the
+        # dialog really needed it.)
         return self.async_show_form(
             step_id="bluetooth_confirm",
-            data_schema=vol.Schema({}),
             description_placeholders={
                 "name": self._discovery_info.name or address,
                 "address": address,
