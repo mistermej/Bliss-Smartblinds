@@ -27,17 +27,22 @@ _LOGGER = logging.getLogger(LOGGER_NAME)
 # and can be found again when the last preset is deleted.
 PRESET_UNIQUE_ID = "{address}_preset"
 
-# What the selector reads when the blind is at none of the saved presets.
+# A blind sitting between presets has no label of its own. current_option
+# returns None for it, which Home Assistant renders as its own lower-case
+# "unknown", and that is what the user sees on screen - confirmed on hardware
+# 2026-10-18.
 #
-# Returned from current_option, which Home Assistant displays whether or not it
-# is one of the options - a blind between presets cannot be sent anywhere, so
-# there is nothing to pick, and naming the state keeps it out of the dropdown
-# where it could be chosen and fail.
+# It cannot be capitalised by returning "Unknown" from current_option instead.
+# A select displays one of its own options and nothing else: a value outside
+# the dropdown is not a state the entity can show, and adding the word to the
+# options to get it on screen would make it pickable - and picking it would
+# fail, since no preset is called that. The position sensor has no such limit,
+# which is why it reads "Custom" and "Unknown" freely.
 #
-# Capitalised because it is a word a person reads in the UI, not a machine
-# value. It used to be None, which Home Assistant renders as a lower-case
-# "unknown" - correct, but the one word in that list not written as a label.
-OFF_PRESET = "Unknown"
+# An earlier version of this comment claimed Home Assistant would display
+# current_option whether or not it was one of the options. Nothing here could
+# have shown that: the value was never returned, so the claim was never on
+# screen to be checked. It is not asserted again without a build that does it.
 
 
 async def async_setup_entry(
