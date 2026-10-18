@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import logging
-
 DOMAIN = "bliss_smartblinds"
 LOGGER_NAME = f"custom_components.{DOMAIN}"
 

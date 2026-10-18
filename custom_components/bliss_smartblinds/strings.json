@@ -80,9 +80,6 @@
           "delete": "Removes the chosen preset instead of saving any changes to it."
         }
       }
-    },
-    "abort": {
-      "no_discovery_info": "Give the preset a name"
     }
   },
   "entity": {
