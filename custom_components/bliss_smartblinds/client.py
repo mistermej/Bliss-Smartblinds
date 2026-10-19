@@ -689,13 +689,28 @@ class BlissClient:
             return True
         return (time.monotonic() - self.last_seen) < stale_after
 
-    async def async_disconnect(self) -> None:
+    async def async_disconnect(self, *, final: bool = False) -> None:
+        """Drop the Bluetooth link - for an unload, or for a quiet moment.
+
+        Two callers, and only one of them is the end of the client. The idle
+        timer calls this eight seconds after the last command; the client stays
+        registered and the next command reconnects, so a pending "Synced"
+        confirmation has to outlive it. Cancelling that confirmation here as
+        well meant it could never fire at all: SYNC_CONFIRM_SECONDS (10s) is
+        longer than IDLE_DISCONNECT (8s), and every sync ends in that idle
+        drop, so the sensor sat on "Synced" until some later command spoke
+        over it.
+
+        ``final=True`` is Home Assistant unloading the entry. Then the client
+        really is going away, and the confirmation must not fire into it.
+        """
         await self.async_flush()
         if self._idle_handle is not None:
             self._idle_handle.cancel()
             self._idle_handle = None
-        # A confirmation left pending would fire into a torn-down client.
-        self._cancel_health_restore()
+        if final:
+            # A confirmation left pending would fire into a torn-down client.
+            self._cancel_health_restore()
         async with self._lock:
             if self._client is not None:
                 try:

@@ -441,7 +441,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Persist before dropping the client, so the last known positions
         # survive the restart.
         await client.async_flush()
-        await client.async_disconnect()
+        # Unloading is the one caller that is the end of the client, so it is
+        # also the one that cancels a confirmation still waiting to expire.
+        await client.async_disconnect(final=True)
 
     # The action belongs to the integration, not to one blind, so it stays
     # registered until the last config entry goes.
