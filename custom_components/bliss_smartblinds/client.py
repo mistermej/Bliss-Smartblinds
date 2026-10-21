@@ -721,6 +721,16 @@ class BlissClient:
                 previous = self._health_before_sync
                 if not previous or previous in (HEALTH_SYNCING, HEALTH_SYNCED):
                     previous = HEALTH_OK
+                # A successful sync disproves the reachability faults it
+                # interrupted: it just read a position out of the motor, so
+                # "Cannot find blind" and "No motor feedback" were true only up
+                # to that moment. Handing them back said the opposite of what
+                # had happened - on 2026-10-21 a sync answered in 2.05s and ten
+                # seconds later the sensor read "Cannot find blind" again.
+                # Move faults are not disproven by a sync, which says nothing
+                # about a clamp, so a collision still stands.
+                elif previous in (HEALTH_NOT_FOUND, HEALTH_NO_FEEDBACK):
+                    previous = HEALTH_OK
                 self._health_before_sync = None
                 self.health = previous
                 self.notify_listeners()
