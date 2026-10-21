@@ -197,6 +197,21 @@ def describe_reach(rail: str, target: float, motor: float) -> str:
     return f"{head}, motor reports {motor:.1f}%"
 
 
+class BlissConnectError(ConnectionError):
+    """The blind could not be reached at all: no link ever came up.
+
+    A ``ConnectionError`` from a *write* is a different fault with a different
+    answer. That one means the link was up and the blind did not reply, which
+    is worth another attempt. This one means the connect never finished, and on
+    2026-10-21 retrying it turned a held connection into 205.8s of waiting: the
+    app holding the link gives the same answer every time, and each answer
+    costs a whole connect budget.
+
+    Subclasses ``ConnectionError`` so every existing ``except ConnectionError``
+    keeps catching it - the sync button's handler among them.
+    """
+
+
 class BlissClient:
     """Manage the BLE connection to one Bliss blind."""
 
@@ -439,7 +454,7 @@ class BlissClient:
                     self.note_health(
                         HEALTH_NOT_FOUND, f"not reachable: {last_error}"
                     )
-                    raise ConnectionError(
+                    raise BlissConnectError(
                         f"Could not reach {self.address} within {timeout:.0f}s. "
                         f"Last reason: {last_error}. "
                         f"{self._connect_advice(heard)}"
@@ -1622,6 +1637,21 @@ class BlissClient:
         for attempt in range(1, attempts + 1):
             try:
                 parsed = await self.async_request_status()
+            except BlissConnectError as err:
+                # No link came up, so there is nothing here to try again. An app
+                # holding the blind's one connection gives the same answer every
+                # time, and each answer costs a whole connect budget: three of
+                # them made 205.8s of a failure one connect reports in 45s.
+                last_error = str(err)
+                parsed = {}
+                _LOGGER.debug(
+                    "%s: sync stopped at %d/%d, the blind never connected (%s)",
+                    self.address,
+                    attempt,
+                    attempts,
+                    last_error,
+                )
+                break
             except ConnectionError as err:
                 # A write that fails outright used to end the whole sync on the
                 # first strike, while the attempts above were reserved for a
