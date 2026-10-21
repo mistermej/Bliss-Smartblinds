@@ -372,6 +372,10 @@ class BlissClient:
 
             deadline = time.monotonic() + timeout
             last_error: str = "not seen by any Bluetooth adapter or proxy"
+            # Whether any adapter reported the blind at all. Heard but never
+            # connected and never heard are different faults with different
+            # answers, and the message used to describe neither.
+            heard = False
 
             while True:
                 ble_device = self._ble_device()
@@ -379,6 +383,7 @@ class BlissClient:
                     # Nothing in the cache: ask the proxies to go and look.
                     self._wake()
                 if ble_device is not None:
+                    heard = True
                     try:
                         await close_stale_connections(ble_device)
                         client = await establish_connection(
@@ -386,6 +391,12 @@ class BlissClient:
                             ble_device,
                             self.name,
                             self._disconnected_callback,
+                            # One attempt per round, so the loop below owns the
+                            # timing. The library's default of four attempts
+                            # turns a 45s budget into 80s of waiting, because
+                            # the deadline is only ever reached between rounds
+                            # and each round was already far longer than it.
+                            max_attempts=1,
                             ble_device_callback=lambda: self._ble_device(),
                         )
                     except Exception as err:  # noqa: BLE001
@@ -418,16 +429,38 @@ class BlissClient:
                     )
                     raise ConnectionError(
                         f"Could not reach {self.address} within {timeout:.0f}s. "
-                        f"Last reason: {last_error}. Things to check: (1) is the "
-                        "Hunter Douglas app open on a phone - a blind accepts only "
-                        "one Bluetooth connection, so an active phone connection "
-                        "stops it being visible; close the app first. (2) is an "
-                        "ESPHome Bluetooth proxy near that blind - a weak proxy "
-                        "may hear it once and then lose it. (3) wake the blind "
-                        "with its remote and retry."
+                        f"Last reason: {last_error}. "
+                        f"{self._connect_advice(heard)}"
                     )
 
                 await asyncio.sleep(1.5)
+
+    def _connect_advice(self, heard: bool) -> str:
+        """What the failure looked like, said in the terms that matter.
+
+        A blind advertises and accepts a single Bluetooth connection. So
+        "heard but never connected" and "never heard at all" are different
+        faults, and the first one has one overwhelmingly common cause: another
+        device holds the link. On the user's install the vendor app in the
+        foreground produced exactly this, twice out of two attempts, and the
+        moment it went to the background the same blind connected in 29s.
+        """
+        if heard:
+            return (
+                f"{self.name} was heard by a Bluetooth proxy but never "
+                "accepted a connection. A blind takes one connection at a "
+                "time, so a second device holding it is the first thing to "
+                "rule out: the Hunter Douglas app on a phone holds it while "
+                "it is open and while it sits in the background. Close it "
+                "fully and retry. The other two causes are a proxy too weak "
+                "to hold the link, and a motor that has to be woken with its "
+                "remote."
+            )
+        return (
+            "No adapter or proxy reported it at all. Check that a Bluetooth "
+            "proxy can hear that blind, then wake the blind with its remote "
+            "and retry."
+        )
 
     def _handle_notification(self, _sender, data: bytearray) -> None:
         payload = bytes(data)
