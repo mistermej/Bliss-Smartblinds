@@ -386,21 +386,33 @@ class BlissClient:
                     heard = True
                     try:
                         await close_stale_connections(ble_device)
-                        client = await establish_connection(
-                            BleakClientWithServiceCache,
-                            ble_device,
-                            self.name,
-                            self._disconnected_callback,
-                            # One attempt per round, so the loop below owns the
-                            # timing. The library's default of four attempts
-                            # turns a 45s budget into 80s of waiting, because
-                            # the deadline is only ever reached between rounds
-                            # and each round was already far longer than it.
-                            max_attempts=1,
-                            ble_device_callback=lambda: self._ble_device(),
+                        # What is *left* of the budget, not a fresh one: a round
+                        # that starts late gets the remainder and no more.
+                        remaining = max(deadline - time.monotonic(), 0.0)
+                        client = await asyncio.wait_for(
+                            establish_connection(
+                                BleakClientWithServiceCache,
+                                ble_device,
+                                self.name,
+                                self._disconnected_callback,
+                                # One attempt where the library honours it, so a
+                                # round cut short does less pointless work. This
+                                # is not what bounds the round: the library runs
+                                # its own loop of attempts, each with a 20s
+                                # timeout and a backoff sleep between them, and
+                                # the deadline is only inspected once that whole
+                                # loop comes back. Measured on the running
+                                # install, 2026-10-21: five internal attempts,
+                                # 205.8s for a 45s budget.
+                                max_attempts=1,
+                                ble_device_callback=lambda: self._ble_device(),
+                            ),
+                            timeout=remaining,
                         )
                     except Exception as err:  # noqa: BLE001
-                        last_error = f"{type(err).__name__}: {err}"
+                        last_error = (
+                            f"{type(err).__name__}: {err}" if str(err) else type(err).__name__
+                        )
                         _LOGGER.debug(
                             "%s: connect attempt failed (%s), retrying",
                             self.address,
