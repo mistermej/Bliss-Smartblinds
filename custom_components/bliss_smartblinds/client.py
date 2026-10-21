@@ -1591,8 +1591,26 @@ class BlissClient:
         """
         self._begin_sync()
         started = time.monotonic()
+        last_error: str | None = None
         for attempt in range(1, attempts + 1):
-            parsed = await self.async_request_status()
+            try:
+                parsed = await self.async_request_status()
+            except ConnectionError as err:
+                # A write that fails outright used to end the whole sync on the
+                # first strike, while the attempts above were reserved for a
+                # motor that stayed silent. The two are the same answer - the
+                # motor did not reply - and on 2026-10-20 a single GATT
+                # error=133 on Voorzijde cost the whole sync and came back as
+                # HTTP 500. Try again within the same budget instead.
+                last_error = str(err)
+                parsed = {}
+                _LOGGER.debug(
+                    "%s: sync attempt %d/%d failed (%s), retrying",
+                    self.address,
+                    attempt,
+                    attempts,
+                    last_error,
+                )
             if parsed:
                 if attempt > 1:
                     _LOGGER.debug(
@@ -1643,6 +1661,19 @@ class BlissClient:
                     delay,
                 )
                 await asyncio.sleep(delay)
+        if last_error:
+            # Not the "connected but silent" case: the write itself failed, so
+            # the warning below - which states that every attempt connected -
+            # would be wrong about this sync.
+            _LOGGER.warning(
+                "%s: sync gave up after %d attempts over %.1fs, and the last "
+                "attempt failed with %s. Positions are unchanged.",
+                self.name,
+                attempts,
+                time.monotonic() - started,
+                last_error,
+            )
+            raise ConnectionError(last_error)
         if self.last_seen is None:
             heard = "Never heard from before"
         else:
