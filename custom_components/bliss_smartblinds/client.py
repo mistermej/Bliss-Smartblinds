@@ -1634,7 +1634,13 @@ class BlissClient:
         self._begin_sync()
         started = time.monotonic()
         last_error: str | None = None
+        # Counted rather than read off ``attempts``, which is only the budget.
+        # A sync that stops at the first connect failure has made one attempt,
+        # and a line saying it gave up "after 3 attempts" is a claim about
+        # something that did not happen.
+        made = 0
         for attempt in range(1, attempts + 1):
+            made = attempt
             try:
                 parsed = await self.async_request_status()
             except BlissConnectError as err:
@@ -1719,13 +1725,15 @@ class BlissClient:
                 )
                 await asyncio.sleep(delay)
         if last_error:
-            # Not the "connected but silent" case: the write itself failed, so
-            # the warning below - which states that every attempt connected -
-            # would be wrong about this sync.
+            # Reached when something raised: a connect that never came up, or a
+            # write that was refused. The other warning below - the one for a
+            # motor that stayed silent - states that every attempt connected,
+            # which is not true here, so this path names the failure instead.
             _LOGGER.warning(
-                "%s: sync gave up after %d attempts over %.1fs, and the last "
-                "attempt failed with %s. Positions are unchanged.",
+                "%s: sync gave up after %d of %d allowed attempts over %.1fs, "
+                "and the last attempt failed with %s. Positions are unchanged.",
                 self.name,
+                made,
                 attempts,
                 time.monotonic() - started,
                 last_error,
