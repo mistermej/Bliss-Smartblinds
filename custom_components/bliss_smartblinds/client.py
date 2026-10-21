@@ -664,6 +664,21 @@ class BlissClient:
             self._health_before_sync = self.health
         self.note_health(HEALTH_SYNCING)
 
+    def _note_sync_failed(self, reason: str) -> None:
+        """Record why the sync failed, instead of leaving "Syncing" standing.
+
+        "Syncing" is written at the start and only cleared by an answer, so a
+        sync that ended in an exception left the Health sensor saying a sync
+        was under way long after the button had reported the failure - three
+        minutes on the user's install, until something else spoke over it.
+
+        Only "Syncing" is replaced. Whatever spoke while the sync was running
+        keeps its own state: a collision recorded during it is still the
+        headline, and a sync that found nothing must not bury it.
+        """
+        if self.health == HEALTH_SYNCING:
+            self.note_health(HEALTH_NO_FEEDBACK, reason)
+
     def _note_synced(self) -> None:
         """Confirm a sync worked, then fall back to the real state shortly."""
         self.note_health(HEALTH_SYNCED)
@@ -1673,6 +1688,7 @@ class BlissClient:
                 time.monotonic() - started,
                 last_error,
             )
+            self._note_sync_failed(last_error)
             raise ConnectionError(last_error)
         if self.last_seen is None:
             heard = "Never heard from before"
@@ -1689,12 +1705,10 @@ class BlissClient:
             heard,
             self.async_get_service_source() or "an unknown proxy",
         )
-        # Left in Syncing rather than forced to OK: a silent motor is not proof
-        # that nothing is wrong, and the Health sensor answering "OK" after a
-        # sync that read nothing would be a lie.
-        self.note_health(
-            HEALTH_NO_FEEDBACK, "a sync read no position from the motor"
-        )
+        # Not forced to OK: a silent motor is not proof that nothing is wrong,
+        # and the Health sensor answering "OK" after a sync that read nothing
+        # would be a lie.
+        self._note_sync_failed("a sync read no position from the motor")
         return {}
 
     # --- state --------------------------------------------------------------
