@@ -133,15 +133,27 @@ class BlissCover(CoordinatorEntity, CoverEntity):
 
     @property
     def available(self) -> bool:
-        """Available based on how recently the motor answered, not on whether it
-        happens to be be connected.
+        """A rail is available whenever it can be commanded.
 
-        These motors are sleepy and stop advertising between commands, so gating
-        availability on a live connection leaves the entity looking permanently
-        broken. A motor that has never answered is still available, with an
-        unknown position, which is honest.
+        Home Assistant drops the service call of an entity whose ``available``
+        is False, and it drops it quietly: the call returns as though it had
+        run, and one line is written to the log. Gating this on
+        ``client.is_present()`` therefore made a blind that had been quiet for
+        ``STALE_SECONDS`` ignore every command while its state still read as
+        healthy. The sync button was the only entity without the gate, so it
+        became the one thing that could wake a blind up again.
+
+        Deleting the override instead of returning True is not equivalent: this
+        class also inherits from ``CoordinatorEntity``, whose ``available`` is
+        ``coordinator.last_update_success`` - a blind would go unavailable
+        again after any status read that failed.
+
+        The command is the test of whether the motor answers. It connects on
+        demand and reports what happened, so a motor that cannot be reached
+        says so in the health sensor (``Move failed``, ``No motor feedback``)
+        instead of the request never being made at all.
         """
-        return self.client.is_present()
+        return True
 
     @property
     def current_cover_position(self) -> int | None:

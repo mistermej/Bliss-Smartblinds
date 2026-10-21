@@ -197,6 +197,21 @@ def describe_reach(rail: str, target: float, motor: float) -> str:
     return f"{head}, motor reports {motor:.1f}%"
 
 
+class BlissConnectError(ConnectionError):
+    """The blind could not be reached at all: no link ever came up.
+
+    A ``ConnectionError`` from a *write* is a different fault with a different
+    answer. That one means the link was up and the blind did not reply, which
+    is worth another attempt. This one means the connect never finished, and on
+    2026-10-21 retrying it turned a held connection into 205.8s of waiting: the
+    app holding the link gives the same answer every time, and each answer
+    costs a whole connect budget.
+
+    Subclasses ``ConnectionError`` so every existing ``except ConnectionError``
+    keeps catching it - the sync button's handler among them.
+    """
+
+
 class BlissClient:
     """Manage the BLE connection to one Bliss blind."""
 
@@ -372,6 +387,10 @@ class BlissClient:
 
             deadline = time.monotonic() + timeout
             last_error: str = "not seen by any Bluetooth adapter or proxy"
+            # Whether any adapter reported the blind at all. Heard but never
+            # connected and never heard are different faults with different
+            # answers, and the message used to describe neither.
+            heard = False
 
             while True:
                 ble_device = self._ble_device()
@@ -379,17 +398,36 @@ class BlissClient:
                     # Nothing in the cache: ask the proxies to go and look.
                     self._wake()
                 if ble_device is not None:
+                    heard = True
                     try:
                         await close_stale_connections(ble_device)
-                        client = await establish_connection(
-                            BleakClientWithServiceCache,
-                            ble_device,
-                            self.name,
-                            self._disconnected_callback,
-                            ble_device_callback=lambda: self._ble_device(),
+                        # What is *left* of the budget, not a fresh one: a round
+                        # that starts late gets the remainder and no more.
+                        remaining = max(deadline - time.monotonic(), 0.0)
+                        client = await asyncio.wait_for(
+                            establish_connection(
+                                BleakClientWithServiceCache,
+                                ble_device,
+                                self.name,
+                                self._disconnected_callback,
+                                # One attempt where the library honours it, so a
+                                # round cut short does less pointless work. This
+                                # is not what bounds the round: the library runs
+                                # its own loop of attempts, each with a 20s
+                                # timeout and a backoff sleep between them, and
+                                # the deadline is only inspected once that whole
+                                # loop comes back. Measured on the running
+                                # install, 2026-10-21: five internal attempts,
+                                # 205.8s for a 45s budget.
+                                max_attempts=1,
+                                ble_device_callback=lambda: self._ble_device(),
+                            ),
+                            timeout=remaining,
                         )
                     except Exception as err:  # noqa: BLE001
-                        last_error = f"{type(err).__name__}: {err}"
+                        last_error = (
+                            f"{type(err).__name__}: {err}" if str(err) else type(err).__name__
+                        )
                         _LOGGER.debug(
                             "%s: connect attempt failed (%s), retrying",
                             self.address,
@@ -416,18 +454,40 @@ class BlissClient:
                     self.note_health(
                         HEALTH_NOT_FOUND, f"not reachable: {last_error}"
                     )
-                    raise ConnectionError(
+                    raise BlissConnectError(
                         f"Could not reach {self.address} within {timeout:.0f}s. "
-                        f"Last reason: {last_error}. Things to check: (1) is the "
-                        "Hunter Douglas app open on a phone - a blind accepts only "
-                        "one Bluetooth connection, so an active phone connection "
-                        "stops it being visible; close the app first. (2) is an "
-                        "ESPHome Bluetooth proxy near that blind - a weak proxy "
-                        "may hear it once and then lose it. (3) wake the blind "
-                        "with its remote and retry."
+                        f"Last reason: {last_error}. "
+                        f"{self._connect_advice(heard)}"
                     )
 
                 await asyncio.sleep(1.5)
+
+    def _connect_advice(self, heard: bool) -> str:
+        """What the failure looked like, said in the terms that matter.
+
+        A blind advertises and accepts a single Bluetooth connection. So
+        "heard but never connected" and "never heard at all" are different
+        faults, and the first one has one overwhelmingly common cause: another
+        device holds the link. On the user's install the vendor app in the
+        foreground produced exactly this, twice out of two attempts, and the
+        moment it went to the background the same blind connected in 29s.
+        """
+        if heard:
+            return (
+                f"{self.name} was heard by a Bluetooth proxy but never "
+                "accepted a connection. A blind takes one connection at a "
+                "time, so a second device holding it is the first thing to "
+                "rule out: the Hunter Douglas app on a phone holds it while "
+                "it is open and while it sits in the background. Close it "
+                "fully and retry. The other two causes are a proxy too weak "
+                "to hold the link, and a motor that has to be woken with its "
+                "remote."
+            )
+        return (
+            "No adapter or proxy reported it at all. Check that a Bluetooth "
+            "proxy can hear that blind, then wake the blind with its remote "
+            "and retry."
+        )
 
     def _handle_notification(self, _sender, data: bytearray) -> None:
         payload = bytes(data)
@@ -631,6 +691,21 @@ class BlissClient:
             self._health_before_sync = self.health
         self.note_health(HEALTH_SYNCING)
 
+    def _note_sync_failed(self, reason: str) -> None:
+        """Record why the sync failed, instead of leaving "Syncing" standing.
+
+        "Syncing" is written at the start and only cleared by an answer, so a
+        sync that ended in an exception left the Health sensor saying a sync
+        was under way long after the button had reported the failure - three
+        minutes on the user's install, until something else spoke over it.
+
+        Only "Syncing" is replaced. Whatever spoke while the sync was running
+        keeps its own state: a collision recorded during it is still the
+        headline, and a sync that found nothing must not bury it.
+        """
+        if self.health == HEALTH_SYNCING:
+            self.note_health(HEALTH_NO_FEEDBACK, reason)
+
     def _note_synced(self) -> None:
         """Confirm a sync worked, then fall back to the real state shortly."""
         self.note_health(HEALTH_SYNCED)
@@ -645,6 +720,16 @@ class BlissClient:
                 # reused by a later confirmation.
                 previous = self._health_before_sync
                 if not previous or previous in (HEALTH_SYNCING, HEALTH_SYNCED):
+                    previous = HEALTH_OK
+                # A successful sync disproves the reachability faults it
+                # interrupted: it just read a position out of the motor, so
+                # "Cannot find blind" and "No motor feedback" were true only up
+                # to that moment. Handing them back said the opposite of what
+                # had happened - on 2026-10-21 a sync answered in 2.05s and ten
+                # seconds later the sensor read "Cannot find blind" again.
+                # Move faults are not disproven by a sync, which says nothing
+                # about a clamp, so a collision still stands.
+                elif previous in (HEALTH_NOT_FOUND, HEALTH_NO_FEEDBACK):
                     previous = HEALTH_OK
                 self._health_before_sync = None
                 self.health = previous
@@ -1558,8 +1643,47 @@ class BlissClient:
         """
         self._begin_sync()
         started = time.monotonic()
+        last_error: str | None = None
+        # Counted rather than read off ``attempts``, which is only the budget.
+        # A sync that stops at the first connect failure has made one attempt,
+        # and a line saying it gave up "after 3 attempts" is a claim about
+        # something that did not happen.
+        made = 0
         for attempt in range(1, attempts + 1):
-            parsed = await self.async_request_status()
+            made = attempt
+            try:
+                parsed = await self.async_request_status()
+            except BlissConnectError as err:
+                # No link came up, so there is nothing here to try again. An app
+                # holding the blind's one connection gives the same answer every
+                # time, and each answer costs a whole connect budget: three of
+                # them made 205.8s of a failure one connect reports in 45s.
+                last_error = str(err)
+                parsed = {}
+                _LOGGER.debug(
+                    "%s: sync stopped at %d/%d, the blind never connected (%s)",
+                    self.address,
+                    attempt,
+                    attempts,
+                    last_error,
+                )
+                break
+            except ConnectionError as err:
+                # A write that fails outright used to end the whole sync on the
+                # first strike, while the attempts above were reserved for a
+                # motor that stayed silent. The two are the same answer - the
+                # motor did not reply - and on 2026-10-20 a single GATT
+                # error=133 on Voorzijde cost the whole sync and came back as
+                # HTTP 500. Try again within the same budget instead.
+                last_error = str(err)
+                parsed = {}
+                _LOGGER.debug(
+                    "%s: sync attempt %d/%d failed (%s), retrying",
+                    self.address,
+                    attempt,
+                    attempts,
+                    last_error,
+                )
             if parsed:
                 if attempt > 1:
                     _LOGGER.debug(
@@ -1610,6 +1734,22 @@ class BlissClient:
                     delay,
                 )
                 await asyncio.sleep(delay)
+        if last_error:
+            # Reached when something raised: a connect that never came up, or a
+            # write that was refused. The other warning below - the one for a
+            # motor that stayed silent - states that every attempt connected,
+            # which is not true here, so this path names the failure instead.
+            _LOGGER.warning(
+                "%s: sync gave up after %d of %d allowed attempts over %.1fs, "
+                "and the last attempt failed with %s. Positions are unchanged.",
+                self.name,
+                made,
+                attempts,
+                time.monotonic() - started,
+                last_error,
+            )
+            self._note_sync_failed(last_error)
+            raise ConnectionError(last_error)
         if self.last_seen is None:
             heard = "Never heard from before"
         else:
@@ -1625,12 +1765,10 @@ class BlissClient:
             heard,
             self.async_get_service_source() or "an unknown proxy",
         )
-        # Left in Syncing rather than forced to OK: a silent motor is not proof
-        # that nothing is wrong, and the Health sensor answering "OK" after a
-        # sync that read nothing would be a lie.
-        self.note_health(
-            HEALTH_NO_FEEDBACK, "a sync read no position from the motor"
-        )
+        # Not forced to OK: a silent motor is not proof that nothing is wrong,
+        # and the Health sensor answering "OK" after a sync that read nothing
+        # would be a lie.
+        self._note_sync_failed("a sync read no position from the motor")
         return {}
 
     # --- state --------------------------------------------------------------

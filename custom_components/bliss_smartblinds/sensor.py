@@ -224,6 +224,23 @@ class BlissHealthSensor(_BlissSensorBase):
     _attr_icon = "mdi:heart-pulse"
 
     @property
+    def available(self) -> bool:
+        """Always shown: this is the diagnosis, not a measurement.
+
+        The other sensors keep the staleness rule, and rightly - a signal
+        strength last read twenty minutes ago is not an answer. Health is the
+        one entity that states the blind's condition, so when a sync failed
+        and every sensor went unavailable, the reason for that failure went
+        with it: on 2026-10-21 all six Voorzijde sensors read "unavailable"
+        while the covers held their state, and there was nothing on the device
+        page to say why.
+
+        The rule it replaces was "not heard from recently", which is the
+        Connection sensor's job and stays there.
+        """
+        return True
+
+    @property
     def native_value(self) -> str:
         if self._maintenance_mode:
             return HEALTH_MAINTENANCE_MODE
