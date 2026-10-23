@@ -1192,13 +1192,18 @@ class BlissClient:
         )
         self._move_seq += 1
         # Two attempts at most: the write, and one resend if the first never
-        # reached the motor. The frame carries absolute positions - ``FE 03
-        # <top> <bottom>``, ``B1 03``/``F4 03`` for a single rail - so a second
-        # copy cannot overshoot: a blind told 70/30 twice ends at 70/30. That
-        # is what makes a resend safe, and also why it must never be copied
-        # onto a move that *was* delivered. On 2026-10-22 at 23:23 one
-        # transient write error ended Woonkamer TDBU TV's whole move, and the
-        # identical frame sent again by hand moved the blind in 20.78s.
+        # reached the motor. The resend covers a write that failed while the
+        # link was up; a ``BlissConnectError`` means the blind was never
+        # reached at all, and the connect loop has already spent the whole
+        # budget reaching for it, so that case is deliberately not sent again -
+        # the branch below says what it would otherwise cost. The frame carries
+        # absolute positions - ``FE 03 <top> <bottom>``, ``B1 03``/``F4 03`` for
+        # a single rail - so a second copy cannot overshoot: a blind told 70/30
+        # twice ends at 70/30. That is what makes a resend safe, and also why
+        # it must never be copied onto a move that *was* delivered. On
+        # 2026-10-22 at 23:23 one transient write error ended Woonkamer TDBU
+        # TV's whole move, and the identical frame sent again by hand moved the
+        # blind in 20.78s.
         for attempt in range(2):
             try:
                 # The speed preset is not sent here, and that is the design
@@ -1230,9 +1235,17 @@ class BlissClient:
                         err,
                     )
                     break
-                if attempt == 0:
-                    # The motor is not where it was told to go, so this attempt
-                    # never reached the wire: send the frame once more.
+                if attempt == 0 and not isinstance(err, BlissConnectError):
+                    # The link was up, the write bounced, and the motor is not
+                    # at the target: send the frame once more. A
+                    # BlissConnectError is not resent - the blind was never
+                    # reached, and every poll of the landed check spends
+                    # another full connect budget (CONNECT_TIMEOUT = 45.0,
+                    # VERIFY_ATTEMPTS polls), so a second write cycle would
+                    # turn the ~3 minutes v1.7 takes to fail on an unreachable
+                    # blind into ~6, with the move lock held throughout. The
+                    # connect loop already retries for its whole budget; that
+                    # is the retry this path does not add.
                     _LOGGER.warning(
                         "%s: the move write failed (%s); sending the frame "
                         "again",
