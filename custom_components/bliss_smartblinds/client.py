@@ -1191,35 +1191,58 @@ class BlissClient:
             "never" if seen is None else f"{seen}s ago",
         )
         self._move_seq += 1
-        try:
-            # The speed preset is not sent here, and that is the design rather
-            # than a placeholder for a later version. v1.4 put a speed frame in
-            # front of every move; a diff against v1.2 and v1.3 showed that
-            # insert was the only thing on the wire that differed, and a
-            # matched pair on real hardware showed it beeping the blind and
-            # shifting it about 2% (72.0/27.4 against 70.1/30.0 from the same
-            # origin, on the same command). The Speed setting is written by
-            # its own path - async_set_speed, from the options flow - and
-            # never as part of a move. Nothing that reaches this function can
-            # ask for a speed frame: there is no speed parameter to pass.
-            await self._async_write(frame)
-        except ConnectionError as err:
-            # With write-with-response, a lost acknowledgement is
-            # indistinguishable from a failed write as far as bleak is
-            # concerned. The user saw a blind reach 68% and be told the move had
-            # failed. Ask the motor where it actually is before believing the
-            # error - the same rule as never claiming success without evidence,
-            # applied to failure.
-            if not await self._async_move_landed(top, bottom, adjust, origin):
+        # Two attempts at most: the write, and one resend if the first never
+        # reached the motor. The frame carries absolute positions - ``FE 03
+        # <top> <bottom>``, ``B1 03``/``F4 03`` for a single rail - so a second
+        # copy cannot overshoot: a blind told 70/30 twice ends at 70/30. That
+        # is what makes a resend safe, and also why it must never be copied
+        # onto a move that *was* delivered. On 2026-10-22 at 23:23 one
+        # transient write error ended Woonkamer TDBU TV's whole move, and the
+        # identical frame sent again by hand moved the blind in 20.78s.
+        for attempt in range(2):
+            try:
+                # The speed preset is not sent here, and that is the design
+                # rather than a placeholder for a later version. v1.4 put a
+                # speed frame in front of every move; a diff against v1.2 and
+                # v1.3 showed that insert was the only thing on the wire that
+                # differed, and a matched pair on real hardware showed it
+                # beeping the blind and shifting it about 2% (72.0/27.4 against
+                # 70.1/30.0 from the same origin, on the same command). The
+                # Speed setting is written by its own path - async_set_speed,
+                # from the options flow - and never as part of a move. Nothing
+                # that reaches this function can ask for a speed frame: there
+                # is no speed parameter to pass.
+                await self._async_write(frame)
+            except ConnectionError as err:
+                # With write-with-response, a lost acknowledgement is
+                # indistinguishable from a failed write as far as bleak is
+                # concerned. The user saw a blind reach 68% and be told the
+                # move had failed. Ask the motor where it actually is before
+                # believing the error - the same rule as never claiming
+                # success without evidence, applied to failure.
+                if await self._async_move_landed(top, bottom, adjust, origin):
+                    _LOGGER.warning(
+                        "%s: the write reported an error (%s) but the motor is "
+                        "at the commanded position, so the command did land "
+                        "and the acknowledgement was lost. Treating the move "
+                        "as successful.",
+                        self.address,
+                        err,
+                    )
+                    break
+                if attempt == 0:
+                    # The motor is not where it was told to go, so this attempt
+                    # never reached the wire: send the frame once more.
+                    _LOGGER.warning(
+                        "%s: the move write failed (%s); sending the frame "
+                        "again",
+                        self.address,
+                        err,
+                    )
+                    continue
                 self.note_health(HEALTH_MOVE_FAILED, str(err))
                 raise
-            _LOGGER.warning(
-                "%s: the write reported an error (%s) but the motor is at the "
-                "commanded position, so the command did land and the "
-                "acknowledgement was lost. Treating the move as successful.",
-                self.address,
-                err,
-            )
+            break
 
         # Only the rail we actually commanded may be cached as "where it is
         # now". With a both-rails frame the other rail was commanded too, so it
