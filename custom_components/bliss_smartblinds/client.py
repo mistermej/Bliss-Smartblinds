@@ -421,6 +421,24 @@ class BlissClient:
                                 # 205.8s for a 45s budget.
                                 max_attempts=1,
                                 ble_device_callback=lambda: self._ble_device(),
+                                # Always perform full GATT service discovery on
+                                # every connect. ESPHome proxies always return
+                                # True from _has_valid_services_in_cache(), so
+                                # without this flag every reconnect reuses stale
+                                # service state left over from the previous
+                                # session. The blind's firmware then receives a
+                                # non-negotiated MTU (mtu=23 instead of mtu=247)
+                                # and either refuses the connection outright or
+                                # silently ignores the motor command — the same
+                                # failure that clearing the vendor app's Android
+                                # cache fixes, because that wipes the GATT cache
+                                # and forces fresh discovery. Bypassing the cache
+                                # here makes every HA connect behave the same
+                                # way. The extra ~0.5 s for service discovery is
+                                # negligible against the existing 1–10 s connect
+                                # times. Ref: ESPHome issue #21880 (ESP-IDF 5.5.6
+                                # regression), observed 2026-11-08/09.
+                                use_services_cache=False,
                             ),
                             timeout=remaining,
                         )
