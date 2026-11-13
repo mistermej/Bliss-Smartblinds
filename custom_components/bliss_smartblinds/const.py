@@ -144,6 +144,7 @@ POSITION_RANGE_HD0100 = 100
 
 # --- Miscellaneous ----------------------------------------------------------
 HEARTBEAT = bytes((0xFF, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01))
+LOGIN_FRAME = bytes((0xFF, 0x03, 0x03, 0x03, 0x03)) + b"xxxxxx"
 BATTERY_FULL = 0
 BATTERY_LOW = 1
 BATTERY_EMPTY = 2

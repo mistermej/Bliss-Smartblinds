@@ -53,6 +53,7 @@ from .const import (
     HEALTH_NO_FEEDBACK,
     HEALTH_SYNCED,
     HEALTH_SYNCING,
+    LOGIN_FRAME,
     LOGGER_NAME,
     POSITION_RANGE_DEFAULT,
     RESPONSE_CHARACTERISTIC_UUID,
@@ -67,6 +68,7 @@ from .protocol import (
     build_set_clock,
     build_speed,
     build_stop,
+    has_characteristic,
     RailCollisionError,
     MIN_RAIL_GAP,
     clamp_rail_positions,
@@ -109,13 +111,46 @@ CONNECT_TIMEOUT = 45.0
 # have a small, fixed number of connection slots, and a sleepy motor should be
 # able to go back to sleep, so the link is closed when idle rather than held open.
 IDLE_DISCONNECT = 8.0
+# How long to wait when throwing away a connection that already failed.
+#
+# The teardown here is bookkeeping, not a clean close: the link is known dead
+# (error=8) or the descriptor write has already been refused, so there is
+# nothing to negotiate. An unbounded await on that would hold the caller's
+# whole connect budget hostage to a peer that is not answering, which is the
+# opposite of what the retry needs - so it is cut short and the attempt moves
+# on either way.
+FAILED_DISCONNECT_TIMEOUT = 5.0
+# How long to wait for the CCD descriptor write that arms notifications.
+#
+# This is the one write in the connect sequence with a known-good upper bound:
+# measured on the running install 2026-11-10/12, every write that succeeded
+# completed in 0.17-0.42s, and every write that failed sat for 19.66-19.87s
+# before the transport gave up with error=133 - a fixed internal timeout, not a
+# signal that was gradually getting worse. Waiting the full 19.7s to learn what
+# a 0.42s operation already told us costs a whole connect budget: at ~28s per
+# failed attempt the 45s CONNECT_TIMEOUT only ever bought two tries, and the
+# recovery observed on 2026-11-12 18:00 needed three (18:00:02 fail, 18:00:42
+# fail, 18:01:05 ok). 5s is more than 12x the slowest healthy write, so it
+# never fires on a working blind and cuts a stalled attempt to ~9s.
+CCD_WRITE_TIMEOUT = 5.0
 STALE_SECONDS = 900.0
 # Persisted-state storage.
 STORAGE_VERSION = 1
 SAVE_DEBOUNCE = 2.0
 # Extra delay before a verification retry; a travelling motor may not answer.
 VERIFY_RETRY_DELAY = 2.0
-VERIFY_ATTEMPTS = 3
+# How many polls to take before calling a move UNVERIFIED.
+#
+# Budget: 1.5s initial delay + 3x (2.0s retry delay + 3.0s reply window) =
+# ~14.5s after connect. Measured on Voorzijde (F9:B1) 2026-11-12, that is one
+# second too thin: the motor does not answer readStatus while travelling, and
+# it answered ~17s after the move went out in *both* events that night - at
+# 21:16:44 the reply landed milliseconds after the 3-poll budget expired
+# (falsely UNVERIFIED, blind had actually reached 0.0%), and at 23:37:03 poll
+# 3/3 was the last poll that could possibly have caught it. A 4th attempt adds
+# one 2.0s+3.0s cycle (~+5s), giving ~22s of budget against the observed 17s
+# reply time. Blinds that answer on poll 1 are unaffected - they exit early.
+VERIFY_ATTEMPTS = 4
 # How many further reads to take while a rail is provably still on its way.
 #
 # The first read happens 1.5s after the command, which for a long move is
@@ -195,6 +230,24 @@ def describe_reach(rail: str, target: float, motor: float) -> str:
     if f"{motor:.1f}" == f"{target:.1f}":
         return head
     return f"{head}, motor reports {motor:.1f}%"
+
+
+def _command_char_resolvable(client) -> bool:
+    """Whether this connection could resolve the Command characteristic.
+
+    ``.services`` is not safe to read on a link that has just gone: it can be
+    empty, incomplete, or raise. All three mean the same thing here - the
+    transport cannot turn the Command UUID into a handle, so a write would come
+    back as ``BleakCharacteristicNotFoundError`` rather than reaching the blind.
+    """
+    try:
+        services = client.services
+        return has_characteristic(services, COMMAND_CHARACTERISTIC_UUID)
+    except Exception:  # noqa: BLE001
+        # Anything raised while reading or walking the collection means the
+        # same thing as an absent characteristic: this connection cannot be
+        # written through, so the caller replaces it.
+        return False
 
 
 class BlissConnectError(ConnectionError):
@@ -421,22 +474,20 @@ class BlissClient:
                                 # 205.8s for a 45s budget.
                                 max_attempts=1,
                                 ble_device_callback=lambda: self._ble_device(),
-                                # Always perform full GATT service discovery on
-                                # every connect. ESPHome proxies always return
-                                # True from _has_valid_services_in_cache(), so
-                                # without this flag every reconnect reuses stale
-                                # service state left over from the previous
-                                # session. The blind's firmware then receives a
-                                # non-negotiated MTU (mtu=23 instead of mtu=247)
-                                # and either refuses the connection outright or
-                                # silently ignores the motor command — the same
-                                # failure that clearing the vendor app's Android
-                                # cache fixes, because that wipes the GATT cache
-                                # and forces fresh discovery. Bypassing the cache
-                                # here makes every HA connect behave the same
-                                # way. The extra ~0.5 s for service discovery is
-                                # negligible against the existing 1–10 s connect
-                                # times. Ref: ESPHome issue #21880 (ESP-IDF 5.5.6
+                                # Always connect as a fresh client (no cached
+                                # services / dangerous_use_bleak_cache=False).
+                                # ESPHome proxies always return True from
+                                # _has_valid_services_in_cache, so without this
+                                # flag every reconnect reuses stale GATT state
+                                # from the proxy after the first session. The
+                                # blind's firmware then sees a "known" client and
+                                # skips MTU negotiation (mtu=23) or refuses the
+                                # connection entirely — matching the behaviour
+                                # fixed by clearing the vendor app's cache on
+                                # Android. Full service discovery adds ~0.5 s per
+                                # connect which is negligible given the existing
+                                # 1-10 s connect times.
+                                # Ref: ESPHome issue #21880 (ESP-IDF 5.5.6
                                 # regression), observed 2026-11-08/09.
                                 use_services_cache=False,
                             ),
@@ -452,20 +503,127 @@ class BlissClient:
                             last_error,
                         )
                     else:
-                        self._client = client
-                        # Notifications carry motor replies. Absence is not fatal.
+                        # Notifications carry motor replies. Their absence is
+                        # not fatal *when the link is otherwise healthy*, but a
+                        # start_notify that fails here is not "absence" - it is
+                        # the blind refusing the descriptor write and then
+                        # dropping the link (measured 2026-11-11/12: the CCD
+                        # write either lands in 0.17-0.42s or stalls for the
+                        # transport's 19.7s timeout and fails error=133, with
+                        # the connection going error=8 before the login frame
+                        # is even sent). Reporting that as "connected" hands
+                        # every later write a client whose connection is
+                        # already gone, which is where the
+                        # BleakCharacteristicNotFoundError failures came from.
+                        # Treat it as a failed attempt so the loop takes
+                        # another one; CCD_WRITE_TIMEOUT bounds the wait so a
+                        # stalled write costs 5s rather than the full 19.7s.
                         try:
-                            await client.start_notify(
-                                RESPONSE_CHARACTERISTIC_UUID,
-                                self._handle_notification,
+                            await asyncio.wait_for(
+                                client.start_notify(
+                                    RESPONSE_CHARACTERISTIC_UUID,
+                                    self._handle_notification,
+                                ),
+                                timeout=CCD_WRITE_TIMEOUT,
                             )
                         except Exception as err:  # noqa: BLE001
+                            if isinstance(err, (asyncio.TimeoutError, TimeoutError)):
+                                # wait_for raises this bare, so str(err) is empty
+                                # and the generic branch below would log nothing
+                                # useful. Say what was actually waited for.
+                                last_error = (
+                                    f"CCD descriptor write timed out after "
+                                    f"{CCD_WRITE_TIMEOUT:.0f}s"
+                                )
+                            else:
+                                last_error = (
+                                    f"{type(err).__name__}: {err}"
+                                    if str(err)
+                                    else type(err).__name__
+                                )
                             _LOGGER.debug(
-                                "%s: notifications unavailable: %s", self.address, err
+                                "%s: notifications unavailable (%s), "
+                                "discarding this connection and retrying",
+                                self.address,
+                                last_error,
                             )
-                        self.available = True
-                        _LOGGER.debug("%s: connected", self.address)
-                        return
+                            self._client = None
+                            try:
+                                await asyncio.wait_for(
+                                    client.disconnect(),
+                                    timeout=FAILED_DISCONNECT_TIMEOUT,
+                                )
+                            except Exception as disc_err:  # noqa: BLE001
+                                _LOGGER.debug(
+                                    "%s: disconnect after failed notify: %s",
+                                    self.address,
+                                    disc_err,
+                                )
+                            self.available = False
+                            # Fall out of the else block and let the deadline
+                            # check below decide whether to try again.
+                        else:
+                            # The link survived the descriptor write, so this
+                            # is the client that gets kept. Storing it only
+                            # here is what makes a failed start_notify produce
+                            # a retry instead of a dead connection marked
+                            # available.
+                            self._client = client
+                            # E1: send login frame immediately after CCD setup
+                            login_err: Exception | None = None
+                            try:
+                                _LOGGER.debug(
+                                    "%s: TX login %s",
+                                    self.address,
+                                    LOGIN_FRAME.hex(" "),
+                                )
+                                await client.write_gatt_char(
+                                    COMMAND_CHARACTERISTIC_UUID,
+                                    LOGIN_FRAME,
+                                    response=True,
+                                )
+                            except Exception as err:  # noqa: BLE001
+                                login_err = err
+
+                            if login_err is not None:
+                                # A write-with-response that raises here is the
+                                # link going, not the blind declining the frame:
+                                # measured 2026-11-11/12 the exception was
+                                # "changed connection status while waiting for
+                                # BluetoothGATTWriteResponse" with the proxy
+                                # reporting error=8 a millisecond earlier. The
+                                # reply *payload* can say Login Fail and still be
+                                # fine - that is a notification, not this - so
+                                # only an exception discards the attempt.
+                                last_error = (
+                                    f"{type(login_err).__name__}: {login_err}"
+                                    if str(login_err)
+                                    else type(login_err).__name__
+                                )
+                                _LOGGER.debug(
+                                    "%s: login write failed (%s), discarding "
+                                    "this connection and retrying",
+                                    self.address,
+                                    last_error,
+                                )
+                                self._client = None
+                                try:
+                                    await asyncio.wait_for(
+                                        client.disconnect(),
+                                        timeout=FAILED_DISCONNECT_TIMEOUT,
+                                    )
+                                except Exception as disc_err:  # noqa: BLE001
+                                    _LOGGER.debug(
+                                        "%s: disconnect after failed login: %s",
+                                        self.address,
+                                        disc_err,
+                                    )
+                                self.available = False
+                                # Fall through to the deadline check.
+                            else:
+                                self.available = True
+                                _LOGGER.debug("%s: connected", self.address)
+                                return
 
                 if time.monotonic() >= deadline:
                     self.available = False
@@ -850,6 +1008,32 @@ class BlissClient:
         client = self._client
         assert client is not None
 
+        # A service collection that cannot resolve the Command characteristic
+        # is the signature of a session whose link has gone: the write would
+        # raise BleakCharacteristicNotFoundError instead of reaching the blind.
+        # Measured 2026-11-11/12, this is exactly the state left behind by a
+        # connect that logged "connected" after the blind had already dropped
+        # the link (error=8). The connection itself is the thing to discard, so
+        # drop it and take a fresh one (services re-discovered on the way)
+        # rather than failing the caller's move.
+        if not _command_char_resolvable(client):
+            _LOGGER.debug(
+                "%s: Command characteristic not resolvable on this connection, "
+                "reconnecting to rediscover services",
+                self.address,
+            )
+            self._client = None
+            try:
+                await asyncio.wait_for(
+                    client.disconnect(),
+                    timeout=FAILED_DISCONNECT_TIMEOUT,
+                )
+            except Exception as disc_err:  # noqa: BLE001
+                _LOGGER.debug("%s: disconnect before rediscovery: %s", self.address, disc_err)
+            await self.async_connect()
+            client = self._client
+            assert client is not None
+
         # Drain stale replies first.
         while not self._responses.empty():
             self._responses.get_nowait()
@@ -1209,71 +1393,35 @@ class BlissClient:
             "never" if seen is None else f"{seen}s ago",
         )
         self._move_seq += 1
-        # Two attempts at most: the write, and one resend if the first never
-        # reached the motor. The resend covers a write that failed while the
-        # link was up; a ``BlissConnectError`` means the blind was never
-        # reached at all, and the connect loop has already spent the whole
-        # budget reaching for it, so that case is deliberately not sent again -
-        # the branch below says what it would otherwise cost. The frame carries
-        # absolute positions - ``FE 03 <top> <bottom>``, ``B1 03``/``F4 03`` for
-        # a single rail - so a second copy cannot overshoot: a blind told 70/30
-        # twice ends at 70/30. That is what makes a resend safe, and also why
-        # it must never be copied onto a move that *was* delivered. On
-        # 2026-10-22 at 23:23 one transient write error ended Woonkamer TDBU
-        # TV's whole move, and the identical frame sent again by hand moved the
-        # blind in 20.78s.
-        for attempt in range(2):
-            try:
-                # The speed preset is not sent here, and that is the design
-                # rather than a placeholder for a later version. v1.4 put a
-                # speed frame in front of every move; a diff against v1.2 and
-                # v1.3 showed that insert was the only thing on the wire that
-                # differed, and a matched pair on real hardware showed it
-                # beeping the blind and shifting it about 2% (72.0/27.4 against
-                # 70.1/30.0 from the same origin, on the same command). The
-                # Speed setting is written by its own path - async_set_speed,
-                # from the options flow - and never as part of a move. Nothing
-                # that reaches this function can ask for a speed frame: there
-                # is no speed parameter to pass.
-                await self._async_write(frame)
-            except ConnectionError as err:
-                # With write-with-response, a lost acknowledgement is
-                # indistinguishable from a failed write as far as bleak is
-                # concerned. The user saw a blind reach 68% and be told the
-                # move had failed. Ask the motor where it actually is before
-                # believing the error - the same rule as never claiming
-                # success without evidence, applied to failure.
-                if await self._async_move_landed(top, bottom, adjust, origin):
-                    _LOGGER.warning(
-                        "%s: the write reported an error (%s) but the motor is "
-                        "at the commanded position, so the command did land "
-                        "and the acknowledgement was lost. Treating the move "
-                        "as successful.",
-                        self.address,
-                        err,
-                    )
-                    break
-                if attempt == 0 and not isinstance(err, BlissConnectError):
-                    # The link was up, the write bounced, and the motor is not
-                    # at the target: send the frame once more. A
-                    # BlissConnectError is not resent - the blind was never
-                    # reached, and every poll of the landed check spends
-                    # another full connect budget (CONNECT_TIMEOUT = 45.0,
-                    # VERIFY_ATTEMPTS polls), so a second write cycle would
-                    # turn the ~3 minutes v1.7 takes to fail on an unreachable
-                    # blind into ~6, with the move lock held throughout. The
-                    # connect loop already retries for its whole budget; that
-                    # is the retry this path does not add.
-                    _LOGGER.warning(
-                        "%s: the move write failed (%s); sending the frame "
-                        "again",
-                        self.address,
-                        err,
-                    )
-                    continue
+        try:
+            # The speed preset is not sent here, and that is the design rather
+            # than a placeholder for a later version. v1.4 put a speed frame in
+            # front of every move; a diff against v1.2 and v1.3 showed that
+            # insert was the only thing on the wire that differed, and a
+            # matched pair on real hardware showed it beeping the blind and
+            # shifting it about 2% (72.0/27.4 against 70.1/30.0 from the same
+            # origin, on the same command). The Speed setting is written by
+            # its own path - async_set_speed, from the options flow - and
+            # never as part of a move. Nothing that reaches this function can
+            # ask for a speed frame: there is no speed parameter to pass.
+            await self._async_write(frame)
+        except ConnectionError as err:
+            # With write-with-response, a lost acknowledgement is
+            # indistinguishable from a failed write as far as bleak is
+            # concerned. The user saw a blind reach 68% and be told the move had
+            # failed. Ask the motor where it actually is before believing the
+            # error - the same rule as never claiming success without evidence,
+            # applied to failure.
+            if not await self._async_move_landed(top, bottom, adjust, origin):
                 self.note_health(HEALTH_MOVE_FAILED, str(err))
                 raise
-            break
+            _LOGGER.warning(
+                "%s: the write reported an error (%s) but the motor is at the "
+                "commanded position, so the command did land and the "
+                "acknowledgement was lost. Treating the move as successful.",
+                self.address,
+                err,
+            )
 
         # Only the rail we actually commanded may be cached as "where it is
         # now". With a both-rails frame the other rail was commanded too, so it

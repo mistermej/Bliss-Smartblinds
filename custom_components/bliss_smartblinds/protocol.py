@@ -404,6 +404,30 @@ def write_needs_response(services, char_uuid: str) -> bool:
     return True
 
 
+def has_characteristic(services, char_uuid: str) -> bool:
+    """Whether ``char_uuid`` appears in ``services``.
+
+    ``write_needs_response`` answers "yes, with response" when services are
+    unknown, because that is the safe default. It cannot tell a *known but
+    incomplete* service collection from a complete one, and a write against an
+    incomplete collection is what raises ``BleakCharacteristicNotFoundError``.
+
+    Empty counts as absent: an empty collection is one the transport cannot
+    resolve a UUID against at all, so a write through it fails the same way.
+    Measured on the running install 2026-11-11/12, the failing writes follow
+    ``Connection state changed to connected=False`` and carry an empty
+    services collection.
+    """
+    if not services:
+        return False
+    target = str(char_uuid).lower()
+    for service in services:
+        for char in service.characteristics:
+            if str(char.uuid).lower() == target:
+                return True
+    return False
+
+
 # --- response parsing -------------------------------------------------------
 
 
