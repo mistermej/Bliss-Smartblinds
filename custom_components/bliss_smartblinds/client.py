@@ -1512,22 +1512,31 @@ class BlissClient:
         still be between its starting point and its target - there being
         nothing left to wait for. Otherwise keep reading; if that runs out,
         return ``settled=False``. Unconfirmed is true either way, a wrong
-        position is only true if the blind actually stopped there.
+        position is only true if the blind actually stopped there. The last of
+        those three only counts once every commanded rail has been observed: a
+        rail that has not spoken cannot be shown to have finished.
 
         An empty first read behaves exactly as it always has: retry, then
-        report that the motor said nothing.
+        report that the motor said nothing. A partial one - a reply missing a
+        commanded rail - is not an answer either: it keeps polling instead of
+        letting one rail's silence end the wait, which is how a late bottom
+        reply became a false "no feedback" verdict.
         """
-        observed = await self._async_first_status_read(attempts=attempts, seq=seq)
+        observed = await self._async_first_status_read(
+            attempts=attempts, seq=seq, rails=rails
+        )
         if not observed:
             return {}, False
         if self._compare(expected=expected, observed=observed, rails=rails) is True:
             return observed, True
-        if not self._in_transit(
+        if self._rails_observed(observed, rails) and not self._in_transit(
             origin=origin, observed=observed, expected=expected, rails=rails
         ):
             # Nothing can be shown to be moving, so this read is the final
             # answer - even when it is the wrong one. That is what lets a
             # genuine mismatch be reported off a single read, as always.
+            # Only when every commanded rail spoke: a missing rail is not
+            # "nothing in transit", it is an answer we do not have yet.
             return observed, True
 
         for attempt in range(VERIFY_SETTLE_ATTEMPTS):
@@ -1560,20 +1569,30 @@ class BlissClient:
             observed = read
             if self._compare(expected=expected, observed=observed, rails=rails) is True:
                 return observed, True  # arrived
-            if not self._in_transit(
+            if self._rails_observed(observed, rails) and not self._in_transit(
                 origin=origin, observed=observed, expected=expected, rails=rails
             ):
+                # Same rule as the first read: a commanded rail that has not
+                # spoken has not been shown to be finished, so keep polling.
                 return observed, True  # no longer on its way: judge it
         return observed, False
 
     async def _async_first_status_read(
-        self, attempts: int = VERIFY_ATTEMPTS, seq: int | None = None
+        self,
+        attempts: int = VERIFY_ATTEMPTS,
+        seq: int | None = None,
+        rails: tuple[str, ...] = (RAIL_TOP, RAIL_BOTTOM),
     ) -> dict:
-        """Poll until the motor answers once, or the retry budget runs out.
+        """Poll until the motor answers for every commanded rail, or the budget runs out.
 
         A motor that is still travelling may not answer a status poll, so a
         single empty poll proves nothing. Retry a few times before concluding
         the motor is not reporting.
+
+        A reply missing a commanded rail counts as no answer. readStatus
+        normally carries both rails, and one arriving after the reply window
+        closed used to end the wait early: the move was then judged on the rail
+        that did arrive, while the rail that mattered had not spoken.
         """
         for attempt in range(attempts):
             if seq is not None and seq != self._move_seq:
@@ -1593,8 +1612,21 @@ class BlissClient:
                     err,
                 )
                 continue
-            if observed:
+            if self._rails_observed(observed, rails):
                 return observed
+            if observed:
+                # Whatever it did carry is already stored by
+                # async_request_status, so nothing is lost by asking again -
+                # only the wait for the rails that have not spoken.
+                _LOGGER.debug(
+                    "%s: verify poll %d/%d answered for %s of the commanded %s",
+                    self.address,
+                    attempt + 1,
+                    attempts,
+                    ",".join(sorted(observed)) or "none",
+                    ",".join(rails),
+                )
+                continue
             _LOGGER.debug(
                 "%s: verify poll %d/%d returned nothing",
                 self.address,
@@ -1602,6 +1634,23 @@ class BlissClient:
                 attempts,
             )
         return {}
+
+    @staticmethod
+    def _rails_observed(
+        observed: dict, rails: tuple[str, ...] = (RAIL_TOP, RAIL_BOTTOM)
+    ) -> bool:
+        """Did the reply carry a position for every commanded rail?
+
+        Half a reply is not an answer. readStatus normally reports both rails
+        and one may simply arrive after the reply window closed; taking that
+        for the motor's final word judged a move by the rail that happened to
+        speak, and flagged the blind as having given no feedback when the other
+        rail's reply landed a second later.
+        """
+        return all(
+            (observed.get(rail) or {}).get("position_percent") is not None
+            for rail in rails
+        )
 
     @staticmethod
     def _positions_agree(
