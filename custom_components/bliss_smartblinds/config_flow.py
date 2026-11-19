@@ -16,7 +16,14 @@ from homeassistant.config_entries import (
 from homeassistant.core import callback
 from homeassistant.helpers.device_registry import format_mac
 
-from .const import CONF_ADDRESS, CONF_NAME, DOMAIN, LOGGER_NAME
+from .const import (
+    CONF_ADDRESS,
+    CONF_CONNECT_TIMEOUT,
+    CONF_NAME,
+    DEFAULT_CONNECT_TIMEOUT,
+    DOMAIN,
+    LOGGER_NAME,
+)
 from .options import BlissOptionsFlow
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
@@ -61,7 +68,7 @@ def _default_name(model: str | None, address: str) -> str:
 class BlissConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for one Bliss blind."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         """The advertisement a discovery flow is asking about."""

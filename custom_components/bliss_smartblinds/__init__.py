@@ -432,6 +432,20 @@ def _apply_options(client: BlissClient, options: dict) -> None:
     client.speed = _speed_of(options)
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate older entries to the new version.
+
+    Ensure the connect_timeout is at least the default (65 s), so that
+    all blinds start with the same timeout and no older stored value
+    below that remains.
+    """
+    opts = dict(entry.options)
+    current = opts.get(CONF_CONNECT_TIMEOUT)
+    if current is None or float(current) < DEFAULT_CONNECT_TIMEOUT:
+        opts[CONF_CONNECT_TIMEOUT] = DEFAULT_CONNECT_TIMEOUT
+        hass.config_entries.async_update_entry(entry, options=opts)
+    return True
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry and disconnect."""
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
