@@ -50,7 +50,6 @@ from .const import (
     HEALTH_NO_FEEDBACK,
     HEALTH_NOT_FOUND,
     HEALTH_OK,
-    HEALTH_NO_FEEDBACK,
     HEALTH_SYNCED,
     HEALTH_SYNCING,
     LOGIN_FRAME,
@@ -106,7 +105,10 @@ VERIFY_DELAY = 1.5
 VERIFY_TOLERANCE = 1.0
 # How long the motor may stay silent before the entity is called unavailable.
 # These motors are sleepy and the link can be weak, so allow a generous window.
-CONNECT_TIMEOUT = 45.0
+# Raised 45 -> 65 on 2026-11-19: two failed attempts through a weak proxy
+# spent ~40s of a 45s budget, and the third attempt - which picked a proxy
+# that connected in 8s moments later - got 0.6s (11-18 22:51, Voorzijde).
+CONNECT_TIMEOUT = 65.0
 # Release the BLE connection this long after the last operation. ESPHome proxies
 # have a small, fixed number of connection slots, and a sleepy motor should be
 # able to go back to sleep, so the link is closed when idle rather than held open.
@@ -128,10 +130,10 @@ FAILED_DISCONNECT_TIMEOUT = 5.0
 # before the transport gave up with error=133 - a fixed internal timeout, not a
 # signal that was gradually getting worse. Waiting the full 19.7s to learn what
 # a 0.42s operation already told us costs a whole connect budget: at ~28s per
-# failed attempt the 45s CONNECT_TIMEOUT only ever bought two tries, and the
-# recovery observed on 2026-11-12 18:00 needed three (18:00:02 fail, 18:00:42
-# fail, 18:01:05 ok). 5s is more than 12x the slowest healthy write, so it
-# never fires on a working blind and cuts a stalled attempt to ~9s.
+# failed attempt the 45s budget then in force only ever bought two tries, and
+# the recovery observed on 2026-11-12 18:00 needed three (18:00:02 fail,
+# 18:00:42 fail, 18:01:05 ok). 5s is more than 12x the slowest healthy write,
+# so it never fires on a working blind and cuts a stalled attempt to ~9s.
 CCD_WRITE_TIMEOUT = 5.0
 STALE_SECONDS = 900.0
 # Persisted-state storage.
@@ -1908,7 +1910,8 @@ class BlissClient:
                 # No link came up, so there is nothing here to try again. An app
                 # holding the blind's one connection gives the same answer every
                 # time, and each answer costs a whole connect budget: three of
-                # them made 205.8s of a failure one connect reports in 45s.
+                # them made 205.8s of a failure one connect reports in one
+                # budget.
                 last_error = str(err)
                 parsed = {}
                 _LOGGER.debug(

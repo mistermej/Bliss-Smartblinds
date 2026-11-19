@@ -373,7 +373,7 @@ def _schedule_speed_write(hass: HomeAssistant, entry: ConfigEntry, speed: str) -
     """Write the new speed to the motor, in the background.
 
     Scheduled rather than awaited: a write connects on demand and the connect
-    timeout is 45 s, so awaiting here would hold the options form open for up
+    timeout is 65 s, so awaiting here would hold the options form open for up
     to that long to put one frame on the wire.
     """
     client = hass.data.get(DOMAIN, {}).get(entry.entry_id)

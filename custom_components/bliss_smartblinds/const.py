@@ -51,7 +51,7 @@ SPEED_LABELS = {
     # label is the user-facing word. Do not "correct" one to match the other.
     "fast": "Standard",
 }
-DEFAULT_CONNECT_TIMEOUT = 45
+DEFAULT_CONNECT_TIMEOUT = 65
 CONNECT_TIMEOUT_MIN = 5
 CONNECT_TIMEOUT_MAX = 300
 
